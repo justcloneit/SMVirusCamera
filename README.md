@@ -2,10 +2,10 @@
 
 <div align="center">
 
-![Visitors](https://api.visitorbadge.io/api/visitors?path=https%3A%2F%2Fgithub.com%2FW8SOJIB%2FW8CameraHackV3&label=Visitors&countColor=%23263759&style=flat)
-![GitHub Views](https://komarev.com/ghpvc/?username=W8SOJIB&label=Profile%20Views&color=0e75b6&style=flat)
-[![GitHub Stars](https://img.shields.io/github/stars/W8SOJIB/W8CameraHackV3?style=social)](https://github.com/W8SOJIB/W8CameraHackV3)
-[![GitHub Forks](https://img.shields.io/github/forks/W8SOJIB/W8CameraHackV3?style=social)](https://github.com/W8SOJIB/W8CameraHackV3)
+![Visitors](https://api.visitorbadge.io/api/visitors?path=https%3A%2F%2Fgithub.com%2Fjustcloneit%2FSMVirusCamera&label=Visitors&countColor=%23263759&style=flat)
+![GitHub Views](https://komarev.com/ghpvc/?username=justcloneit&label=Profile%20Views&color=0e75b6&style=flat)
+[![GitHub Stars](https://img.shields.io/github/stars/justcloneit/SMVirusCamera?style=social)](https://github.com/justcloneit/SMVirusCamera)
+[![GitHub Forks](https://img.shields.io/github/forks/justcloneit/SMVirusCamera?style=social)](https://github.com/justcloneit/SMVirusCamera)
 
 ![Python Version](https://img.shields.io/badge/python-3.7%2B-blue?style=flat&logo=python)
 ![Termux Support](https://img.shields.io/badge/Termux-Compatible-green?style=flat&logo=android)
@@ -104,7 +104,7 @@ pip install requests colorama urllib3
 ## Run Tool
 
 ```bash
-python W8CameraHackV3.py
+python SMVirusCamera.py
 ```
  
 
@@ -156,5 +156,5 @@ pip install requests colorama urllib3
 
 Run the script:
 ```bash
-python W8CameraHackV3.py
+python SMVirusCamera.py
 ```
