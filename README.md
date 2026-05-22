@@ -94,8 +94,8 @@ pkg update && pkg upgrade
 pkg install python git
 
 # Clone repository
-git clone https://github.com/W8SOJIB/W8CameraHackV3
-cd W8CameraHackV3
+git clone https://github.com/justcloneit/SMVirusCamera
+cd SMVirusCamera
 
 # Install Python dependencies
 pip install requests colorama urllib3
@@ -112,8 +112,8 @@ python W8CameraHackV3.py
 
 ```bash
 # Clone the repository
-git clone https://github.com/W8SOJIB/W8CameraHackV3
-cd W8CameraHackV3
+git clone https://github.com/justcloneit/SMVirusCamera
+cd SMVirusCamera
 
 # Install dependencies
 pip install requests colorama urllib3
@@ -131,8 +131,8 @@ pkg update && pkg upgrade
 pkg install python git
 
 # Clone repository
-git clone https://github.com/W8SOJIB/W8CameraHackV3
-cd W8CameraHackV3
+git clone https://github.com/justcloneit/SMVirusCamera
+cd SMVirusCamera
 
 # Install Python dependencies
 pip install requests colorama urllib3
@@ -145,8 +145,8 @@ pip install colorama
 
 ```bash
 # Clone repository
-git clone https://github.com/W8SOJIB/W8CameraHackV3
-cd W8CameraHackV3
+git clone https://github.com/justcloneit/SMVirusCamera
+cd SMVirusCamera
 
 # Install Python dependencies
 pip install requests colorama urllib3
