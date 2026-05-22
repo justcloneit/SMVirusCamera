@@ -13,6 +13,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green?style=flat)
 ![Countries](https://img.shields.io/badge/countries-44-brightgreen?style=flat)
 ![One Click](https://img.shields.io/badge/operation-one--click-orange?style=flat)
+
 A powerful multi-phase camera scanner and device validator supporting 243 countries across all 5 global RIR registries. Detects IP cameras, NVR/DVR systems, ONVIF devices, and routers — then validates credentials, probes RTSP streams, tests CVEs, and delivers results directly to Telegram automatically.
 
 Features
