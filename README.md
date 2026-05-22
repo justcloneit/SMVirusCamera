@@ -21,13 +21,18 @@
 A powerful multi-phase camera scanner and device validator supporting 243 countries across all 5 global RIR registries. Detects IP cameras, NVR/DVR systems, ONVIF devices, and routers — then validates credentials, probes RTSP streams, tests CVEs, and delivers results directly to Telegram automatically.
 
 Features
-🌍 Country & IP Range Support
-243 Countries across all 5 RIR regions:
+🌍 Country & IP Range Support (243 Countries across all 5 RIR regions):
+
 APNIC — Asia-Pacific (44 countries)
+
 RIPE NCC — Europe, Middle East, Central Asia
+
 ARIN — North America, Caribbean
+
 LACNIC — Latin America, Caribbean
+
 AFRINIC — Africa
+
 Auto-fetches latest IP allocations directly from each registry's FTP server
 No manual IP file management needed
 📹 Device Detection & Login Validation
