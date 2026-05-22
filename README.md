@@ -24,7 +24,6 @@ Features
 🌍 Country & IP Range Support (243 Countries across all 5 RIR regions):
 
 APNIC — Asia-Pacific (44 countries)
-
 RIPE NCC — Europe, Middle East, Central Asia
 ARIN — North America, Caribbean
 LACNIC — Latin America, Caribbean
