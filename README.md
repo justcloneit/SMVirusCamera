@@ -26,27 +26,27 @@ Features
 APNIC — Asia-Pacific (44 countries)
 
 RIPE NCC — Europe, Middle East, Central Asia
-
 ARIN — North America, Caribbean
-
 LACNIC — Latin America, Caribbean
-
 AFRINIC — Africa
 
 Auto-fetches latest IP allocations directly from each registry's FTP server
 No manual IP file management needed
+
 📹 Device Detection & Login Validation
 Multi-Brand Detection: Hikvision, Dahua/Anjhua, NVR, DVR, ONVIF, Axis, Foscam, Reolink, Amcrest, Uniview, Tiandy, and more
 Device Model Extraction from HTTP Server headers
 Brute-Force Login Validator with Digest/Basic authentication (Hikvision ISAPI & Dahua HTTP API)
 Custom Credentials loaded from credentials.txt (username:password per line)
 Credential Stats Dashboard — per-credential success tracking with daily and dated breakdowns
+
 📡 RTSP Path Tester (Option 13) — 5 Modes
 Single — probe one camera IP manually with live path-by-path output; auto-sends best URL + file to Telegram
 Batch — test all cameras from one or more ValidCamera files in parallel; multi-file select with comma/range syntax (1,3, 2-4); auto-sends summary + RTSP_Tested.txt to Telegram
 View — browse and inspect any RTSP result file; bulk-merge selected URLs into RTSP_Tested.txt; send files to Telegram
 M3U — generate a VLC-ready .m3u playlist from any combination of RTSP/ValidCamera files with proper #EXTINF entries; auto-sends playlist to Telegram
 Quick Re-Test — re-pings every URL in RTSP_Tested.txt (or any RTSP file), removes dead/unreachable URLs, saves the cleaned file atomically, and auto-sends updated file to Telegram
+
 📲 Telegram Integration (Automatic)
 Auto-send after every operation — no y/n prompt, files are delivered immediately when Telegram is enabled
 Scan start/stop notifications
@@ -56,13 +56,16 @@ RTSP URL delivery after single, batch, M3U, and re-test operations
 Emergency crash handler — sends error details and backup files on unexpected exit
 Multi-destination support (multiple bot tokens/chat IDs)
 Rate-limited (0.5s minimum interval) with 429 retry handling
+
 ⚡ Performance
 300 concurrent threads for maximum scan speed
 0.15s port scan timeout for ultra-fast detection
 Parallel port scanning per IP
 Submit-all-per-range with as_completed (no chunking/cancellation bugs)
 Bounded Telegram queue (max 500 messages) to prevent memory overflow
+
 🔧 Advanced Tools
+
 NVR Channel Splitter — splits multi-channel NVR RTSP streams into individual URLs
 CVE Scanner — tests for known camera firmware vulnerabilities
 Batch Country Scan — scan multiple countries sequentially with one command
