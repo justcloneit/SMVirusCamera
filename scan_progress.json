@@ -1,0 +1,12 @@
+{
+  "country_code": "US",
+  "country_name": "United States",
+  "scanned_count": 67777970,
+  "total_ips": 1580710656,
+  "last_ip_index": 31,
+  "last_ip_in_range": "",
+  "ip_file_checksum": "",
+  "stop_reason": "",
+  "cctv_output_file": "/home/runner/workspace/US_CCTV_Found.txt",
+  "timestamp": "2026-05-17 15:16:06"
+}
