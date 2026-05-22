@@ -14,6 +14,10 @@
 ![Countries](https://img.shields.io/badge/countries-44-brightgreen?style=flat)
 ![One Click](https://img.shields.io/badge/operation-one--click-orange?style=flat)
 
+### 🎯 Real-Time Visitor Counter - See Who's Visiting! 👆
+
+</div>
+
 A powerful multi-phase camera scanner and device validator supporting 243 countries across all 5 global RIR registries. Detects IP cameras, NVR/DVR systems, ONVIF devices, and routers — then validates credentials, probes RTSP streams, tests CVEs, and delivers results directly to Telegram automatically.
 
 Features
@@ -68,17 +72,82 @@ Two build scripts included:
 
 build_exe.py — standard Wine + PyInstaller build, produces standalone Windows .exe
 build_custom_bootloader.py — AV-bypass build: compiles PyInstaller bootloader from source using MinGW cross-compiler for a unique binary signature
-Installation
-Termux (Android)
-pkg update && pkg upgrade
-pkg install python git
-git clone https://github.com/justcloneit/SMVirusCamera
-cd SMVirusCamera
-pip install requests colorama pyfiglet urllib3
-python W8CameraHackV3.py
 
-Linux / Mac
-git clone https://github.com/justcloneit/SMVirusCamera
-cd SMVirusCamera
-pip install requests colorama pyfiglet urllib3
+## Installation
+
+### Quick Install (Recommended)
+
+#### For Termux (Android)
+
+```bash
+# Update packages
+pkg update && pkg upgrade
+
+# Install required packages
+pkg install python git
+
+# Clone repository
+git clone https://github.com/W8SOJIB/W8CameraHackV3
+cd W8CameraHackV3
+
+# Install Python dependencies
+pip install requests colorama urllib3
+```
+
+## Run Tool
+
+```bash
 python W8CameraHackV3.py
+```
+ 
+
+#### For Desktop (Windows/Linux/Mac)
+
+```bash
+# Clone the repository
+git clone https://github.com/W8SOJIB/W8CameraHackV3
+cd W8CameraHackV3
+
+# Install dependencies
+pip install requests colorama urllib3
+```
+
+### Manual Installation
+
+#### For Termux (Android)
+
+```bash
+# Update packages
+pkg update && pkg upgrade
+
+# Install required packages
+pkg install python git
+
+# Clone repository
+git clone https://github.com/W8SOJIB/W8CameraHackV3
+cd W8CameraHackV3
+
+# Install Python dependencies
+pip install requests colorama urllib3
+
+# Optional: For better colors (if colorama install fails, the script works without it)
+pip install colorama
+```
+
+#### For Desktop (Windows/Linux/Mac)
+
+```bash
+# Clone repository
+git clone https://github.com/W8SOJIB/W8CameraHackV3
+cd W8CameraHackV3
+
+# Install Python dependencies
+pip install requests colorama urllib3
+```
+
+## Usage
+
+Run the script:
+```bash
+python W8CameraHackV3.py
+```
