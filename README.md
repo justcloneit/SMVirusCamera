@@ -1,3 +1,18 @@
+# Camera Login Valid Checker v3.0 - Advanced Camera Scanner & Brute Force Tool
+
+<div align="center">
+
+![Visitors](https://api.visitorbadge.io/api/visitors?path=https%3A%2F%2Fgithub.com%2FW8SOJIB%2FW8CameraHackV3&label=Visitors&countColor=%23263759&style=flat)
+![GitHub Views](https://komarev.com/ghpvc/?username=W8SOJIB&label=Profile%20Views&color=0e75b6&style=flat)
+[![GitHub Stars](https://img.shields.io/github/stars/W8SOJIB/W8CameraHackV3?style=social)](https://github.com/W8SOJIB/W8CameraHackV3)
+[![GitHub Forks](https://img.shields.io/github/forks/W8SOJIB/W8CameraHackV3?style=social)](https://github.com/W8SOJIB/W8CameraHackV3)
+
+![Python Version](https://img.shields.io/badge/python-3.7%2B-blue?style=flat&logo=python)
+![Termux Support](https://img.shields.io/badge/Termux-Compatible-green?style=flat&logo=android)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20Android-lightgrey?style=flat)
+![License](https://img.shields.io/badge/license-MIT-green?style=flat)
+![Countries](https://img.shields.io/badge/countries-44-brightgreen?style=flat)
+![One Click](https://img.shields.io/badge/operation-one--click-orange?style=flat)
 A powerful multi-phase camera scanner and device validator supporting 243 countries across all 5 global RIR registries. Detects IP cameras, NVR/DVR systems, ONVIF devices, and routers — then validates credentials, probes RTSP streams, tests CVEs, and delivers results directly to Telegram automatically.
 
 Features
