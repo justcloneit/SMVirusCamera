@@ -11,7 +11,7 @@
 ![Termux Support](https://img.shields.io/badge/Termux-Compatible-green?style=flat&logo=android)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20Android-lightgrey?style=flat)
 ![License](https://img.shields.io/badge/license-MIT-green?style=flat)
-![Countries](https://img.shields.io/badge/countries-44-brightgreen?style=flat)
+![Countries](https://img.shields.io/badge/countries-243+-brightgreen?style=flat)
 ![One Click](https://img.shields.io/badge/operation-one--click-orange?style=flat)
 
 ### 🎯 Real-Time Visitor Counter - See Who's Visiting! 👆
