@@ -1084,14 +1084,22 @@ def try_exploit_cve(ip: str, port: int, camera_type: str, timeout: float = 4.0) 
                 'response_snippet': snippet,
             })
         except Exception as _ex:
-            print(f"  {Y}[{cve_id}] probe error: {_ex}{W}")
+            _ex_s = str(_ex)
+            _net_err = any(k in _ex_s for k in (
+                'RemoteDisconnected', 'ConnectionAborted', 'ConnectionReset',
+                'timeout', 'refused', 'Broken pipe', 'reset by peer',
+                'forcibly closed', 'timed out', 'No route'))
+            if _net_err:
+                print(f"  {Y}[{cve_id}] device closed connection (not exploitable via HTTP){W}")
+            else:
+                print(f"  {Y}[{cve_id}] probe failed: {type(_ex).__name__}{W}")
             results.append({
                 'cve_id': cve_id,
                 'desc': cve_desc,
                 'severity': cve_sev,
                 'status_code': -1,
                 'exploited': False,
-                'response_snippet': str(_ex)[:80],
+                'response_snippet': _ex_s[:80],
             })
     return results
 
@@ -4864,7 +4872,7 @@ def fast_port_scan(ip: str,
             for port in results:
                 if port:
                     open_ports.append(port)
-                    if port in [80, 443, 37777]:
+                    if port in [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779]:
                         break
     except RuntimeError:
         # OS thread limit hit — fall back to sequential scan
@@ -4872,7 +4880,7 @@ def fast_port_scan(ip: str,
             _r = check_port(_p)
             if _r:
                 open_ports.append(_r)
-                if _r in [80, 443, 37777]:
+                if _r in [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779]:
                     break
 
     return open_ports
@@ -6535,7 +6543,7 @@ def scan_ip_range(start_ip: str,
         print(f"{Fore.RED}[!] Invalid IP range!{Style.RESET_ALL}")
         return
 
-    ports_to_scan = _cli_port_override if _cli_port_override else [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]  # expanded port list
+    ports_to_scan = _cli_port_override if _cli_port_override else [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]  # expanded port list
 
     if max_workers is None:
         max_workers = calculate_optimal_workers('scan')
@@ -7006,7 +7014,7 @@ def scan_country_cameras(country: dict,
         return
 
     total_ips = ip_count
-    ports_to_scan = _cli_port_override if _cli_port_override else [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]  # expanded port list
+    ports_to_scan = _cli_port_override if _cli_port_override else [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]  # expanded port list
 
     if max_workers is None:
         max_workers = calculate_optimal_workers('scan')
@@ -8845,7 +8853,7 @@ def scan_country_cameras_detection_only(country: dict,
         return
 
     total_ips = ip_count
-    ports_to_scan = _cli_port_override if _cli_port_override else [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]  # expanded port list
+    ports_to_scan = _cli_port_override if _cli_port_override else [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]  # expanded port list
 
     if max_workers is None:
         max_workers = calculate_optimal_workers('scan')
@@ -10179,7 +10187,7 @@ def run_rtsp_file_scan(input_files=None):
                 out_dir = _results_root
 
             fname_prefix = (
-                f"{geo_cc}_{_safe_name(region)}_{ip.replace('.','_')}_{port}"
+                f"{geo_cc}_{_safe_name(country)}_{_safe_name(region)}_{ip.replace('.','_')}_{port}"
             )
 
             # ── Full NVR channel split ────────────────────────────────────────
@@ -10912,6 +10920,82 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
             if len(_channels) >= _max_ch:
                 break
 
+    # ── Supplementary RTSP probe — find channels missed by API detection ──────
+    # API methods (ONVIF/ISAPI/Dahua CGI) often return only ACTIVE channels —
+    # those with a camera physically wired in.  On a 16-ch NVR with 4 cameras,
+    # you get 4 channels from the API even though all 16 slots are streamable.
+    # We probe channels 1-32 directly via RTSP DESCRIBE and merge any findings
+    # not already captured, so VLC sees ALL available streams.
+    if _tcp_ok_rtsp and _rtsp_port:
+        _supp_existing = {c['num'] for c in _channels if not c.get('zero_ch')}
+        _src_lc = (_channels[0]['source'] if _channels else 'Generic').lower()
+        if 'hikvision' in _src_lc or 'hik' in _src_lc:
+            _supp_tpls = ['/Streaming/Channels/{n}01', '/h264/ch{n}/main/av_stream']
+        elif 'dahua' in _src_lc or 'anjhua' in _src_lc:
+            _supp_tpls = ['/cam/realmonitor?channel={n}&subtype=0']
+        else:
+            _supp_tpls = [
+                '/Streaming/Channels/{n}01',
+                '/cam/realmonitor?channel={n}&subtype=0',
+                '/h264/ch{n}/main/av_stream',
+            ]
+        _supp_added = 0
+        _supp_miss  = 0   # consecutive channels with no valid response
+        for _sn in range(1, 33):
+            if len(_channels) >= _max_ch:
+                break
+            if _sn in _supp_existing:
+                _supp_miss = 0
+                continue
+            if _supp_miss >= 4:
+                break   # 4 consecutive empty slots → stop probing
+            _found_ch = False
+            for _stpl in _supp_tpls:
+                if _found_ch:
+                    break
+                _spath = _stpl.replace('{n}', str(_sn))
+                _surl  = (f"rtsp://{nvr_user}:{nvr_pass}"
+                          f"@{nvr_ip}:{_rtsp_port}{_spath}")
+                try:
+                    _ss = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    _ss.settimeout(0.7)
+                    _ss.connect((nvr_ip, _rtsp_port))
+                    _ss.sendall((f"DESCRIBE {_surl} RTSP/1.0\r\nCSeq: 1\r\n"
+                                 f"User-Agent: SMVScanner\r\n\r\n").encode())
+                    _sresp = _ss.recv(128).decode('utf-8', errors='replace')
+                    _ss.close()
+                    if ' 200 ' in _sresp or ' 401 ' in _sresp:
+                        _snap_url = (
+                            f"http://{nvr_ip}:{nvr_port}/ISAPI/Streaming/channels/{_sn}01/picture"
+                            if ('hikvision' in _src_lc or 'hik' in _src_lc)
+                            else f"http://{nvr_ip}:{nvr_port}/cgi-bin/snapshot.cgi?channel={_sn}"
+                        )
+                        _channels.append({
+                            'num':      _sn,
+                            'name':     f"Channel {_sn}",
+                            'rtsp':     _surl,
+                            'snapshot': _snap_url,
+                            'source':   'Supplementary',
+                        })
+                        _supp_existing.add(_sn)
+                        _supp_added += 1
+                        _supp_miss   = 0
+                        _found_ch    = True
+                        if not silent:
+                            print(f"    {G}[+] Supp Ch{_sn}: {_spath}{W}")
+                except Exception:
+                    break   # RTSP port suddenly unreachable
+            if not _found_ch:
+                _supp_miss += 1
+        if _supp_added and not silent:
+            print(f"  {G}[+] Supplementary probe added {_supp_added} channel(s){W}")
+
+    # Sort all non-ZeroChannel entries by channel number for clean output
+    _zero_chs = [c for c in _channels if c.get('zero_ch')]
+    _real_chs  = sorted([c for c in _channels if not c.get('zero_ch')],
+                        key=lambda x: x['num'])
+    _channels  = _zero_chs + _real_chs
+
     # ── ZeroChannel / Composite-stream probe (all brands) ────────────────────
     # Many NVR/DVR systems expose a special "channel 0" that streams ALL cameras
     # as a single composite grid feed in one RTSP URL.  We probe every known
@@ -11198,7 +11282,42 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
     if fname_prefix:
         _fname_base = fname_prefix
     else:
-        _fname_base = f"NVR_{nvr_ip.replace('.','_')}_{nvr_port}"
+        _cc_geo  = _geo.get('countryCode', _geo.get('country_code', 'XX')).upper() or 'XX'
+        _cn_geo  = re.sub(r'[^A-Za-z0-9]+', '_', _geo.get('country', 'Unknown')).strip('_')
+        _rg_geo  = re.sub(r'[^A-Za-z0-9]+', '_', _geo.get('regionName', _geo.get('region', 'Unknown'))).strip('_')
+        _fname_base = f"NVR_{_cc_geo}_{_cn_geo}_{_rg_geo}_{nvr_ip.replace('.','_')}_{nvr_port}"
+
+    # ── Derive sub-stream URLs for all channels ───────────────────────────────
+    def _derive_sub_rtsp(main_url: str):
+        """Return the sub-stream RTSP URL derived from the main-stream URL, or None."""
+        if not main_url:
+            return None
+        import re as _re_sub
+        # Hikvision: /Streaming/Channels/N01 → /Streaming/Channels/N02
+        _hm = _re_sub.search(r'(/Streaming/Channels/\d+)01(?=\b|$|[/?])', main_url)
+        if _hm:
+            return main_url[:_hm.start()] + _hm.group(1) + '02' + main_url[_hm.end():]
+        # Dahua / Anjhua / Uniview: subtype=0 → subtype=1
+        if 'subtype=0' in main_url:
+            return main_url.replace('subtype=0', 'subtype=1', 1)
+        # Generic h264/chN/main/av_stream → /sub/av_stream
+        if '/main/av_stream' in main_url:
+            return main_url.replace('/main/av_stream', '/sub/av_stream', 1)
+        # Reolink: _main → _sub
+        if '_main' in main_url:
+            return main_url.replace('_main', '_sub', 1)
+        # Foscam: /videoMain → /videoSub
+        if '/videoMain' in main_url:
+            return main_url.replace('/videoMain', '/videoSub', 1)
+        # Axis: append reduced resolution param
+        if '/axis-media/media.amp' in main_url:
+            _sep = '&' if '?' in main_url else '?'
+            return main_url + _sep + 'videocodec=h264&resolution=640x360'
+        return None
+
+    for _ch in _channels:
+        if 'rtsp_sub' not in _ch:
+            _ch['rtsp_sub'] = _derive_sub_rtsp(_ch.get('rtsp', ''))
 
     # ── Export TEXT ───────────────────────────────────────────────────────────
     try:
@@ -11238,6 +11357,8 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                 _tf.write('─' * 70 + '\n')
                 _tf.write(f"Channel  : {_ch['num']} — {_ch['name']}  [{_live_tag}]\n")
                 _tf.write(f"RTSP     : {_ch['rtsp']}\n")
+                if _ch.get('rtsp_sub'):
+                    _tf.write(f"Sub-Stream: {_ch['rtsp_sub']}\n")
                 _tf.write(f"Snapshot : {_ch['snapshot']}\n")
         if not silent:
             print(f"\n{C}{'═'*70}{W}")
@@ -11284,11 +11405,16 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
             )
             for _ch in sorted(_m3u_channels, key=lambda x: x['num']):
                 _live_flag = ' ✓' if _ch.get('live') == 'LIVE' else ''
+                _geo_tag = f"{_geo.get('city','?')}, {_geo.get('region','?')}, {_geo.get('country','?')}"
                 _mf.write(
-                    f"#EXTINF:-1, Ch{_ch['num']} — {_ch['name']}{_live_flag} │ "
-                    f"{_geo.get('city','?')}, {_geo.get('region','?')}, {_geo.get('country','?')}\n"
+                    f"#EXTINF:-1, Ch{_ch['num']} — {_ch['name']}{_live_flag} │ {_geo_tag}\n"
                 )
                 _mf.write(f"{_ch['rtsp']}\n")
+                if _ch.get('rtsp_sub'):
+                    _mf.write(
+                        f"#EXTINF:-1, Ch{_ch['num']} [Sub] — {_ch['name']}{_live_flag} │ {_geo_tag}\n"
+                    )
+                    _mf.write(f"{_ch['rtsp_sub']}\n")
         if not silent:
             print(f"  {G}[✓] Saved M3U: {_fname_base}.m3u{W}")
     except Exception as _e:
@@ -16138,7 +16264,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             sys.exit(1)
 
         # Full camera port set
-        _PS_PORTS   = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
+        _PS_PORTS   = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         _PS_TIMEOUT = 1.5
         _PS_WORKERS = 200
 
@@ -18870,7 +18996,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
         _fca_target   = sys.argv[_fca_idx + 1]
         _fca_timeout  = 1.0
         _fca_threads  = 200
-        _fca_ports    = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
+        _fca_ports    = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         if '--timeout' in sys.argv:
             try: _fca_timeout = float(sys.argv[sys.argv.index('--timeout') + 1])
             except: pass
@@ -20847,7 +20973,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             print(f"{R}[!] Invalid CIDR: {_sr_cidr}  ({_srve}){W}")
             sys.exit(1)
         _sr_ips   = [str(h) for h in _sr_net.hosts()]
-        _sr_ports = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
+        _sr_ports = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         _sr_workers = 150
         if '--threads' in sys.argv:
             try:
@@ -20946,7 +21072,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
         except ValueError as _srhe:
             print(f"{R}[!] Invalid CIDR: {_srh_cidr}  ({_srhe}){W}"); sys.exit(1)
         _srh_ips     = [str(h) for h in _srh_net.hosts()]
-        _srh_ports   = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
+        _srh_ports   = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         _srh_workers = 150
         if '--threads' in sys.argv:
             try:
@@ -21570,7 +21696,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
 
         # 1. Port scan
         _rep(f"\n[1/5] Port Scan", C)
-        _rep_probe_ports = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
+        _rep_probe_ports = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         _open = fast_port_scan(_rep_ip, _rep_probe_ports, timeout=1.0)
         if _open:
             _rep(f"  Open ports : {', '.join(str(p) for p in _open)}", G)
@@ -21848,7 +21974,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                 return res
             # 1 ports
             res['open'] = fast_port_scan(
-                ip, [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779],
+                ip, [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567],
                 timeout=1.0)
             # 2 type
             _bcf, _bct = detect_camera_via_http(ip, port)
@@ -22281,7 +22407,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             if not ip: return res
             # 1 port scan
             res['open'] = fast_port_scan(
-                ip, [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779],
+                ip, [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567],
                 timeout=1.0)
             # 2 type detect
             _acf, _act = detect_camera_via_http(ip, port)
@@ -22578,7 +22704,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
         print(f"{C}{'═'*70}{W}")
         # Stage 1: port scan
         print(f"  {C}[1/5] Port scan ...{W}", end='', flush=True)
-        _rh_probe_ports = [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
+        _rh_probe_ports = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         _rh_open = fast_port_scan(_rh_ip, _rh_probe_ports, timeout=1.0)
         print(f" {G}done{W}")
         # Stage 2: camera type
@@ -25460,7 +25586,7 @@ if (CAMERAS.length > 0) {{
             'common':    [80, 443, 554, 1050, 3000, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 34567, 37777, 37778, 37779],
             'rtsp':      [554, 8554, 10554, 1024, 5554, 7554, 34567, 37778, 37779],
             'http':      [80, 443, 1025, 1050, 3000, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8888, 9000],
-            'all':       [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779],
+            'all':       [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567],
         }
         _ppname = _args.port_profile.lower().strip()
         if _ppname not in _PORT_PROFILES:
@@ -25559,7 +25685,7 @@ if (CAMERAS.length > 0) {{
         print(f"  {Y}Country     {W}: {_dr_cstr}")
 
         # Ports
-        _dr_ports = _cli_port_override if _cli_port_override else [80, 443, 554, 1024, 1025, 1050, 3000, 5554, 7554, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 10554, 34567, 37777, 37778, 37779]
+        _dr_ports = _cli_port_override if _cli_port_override else [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         print(f"  {Y}Ports       {W}: {', '.join(str(p) for p in _dr_ports)}")
 
         # Threads
