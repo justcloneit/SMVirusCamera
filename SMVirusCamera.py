@@ -11262,8 +11262,14 @@ def run_rtsp_file_scan(input_files=None):
     _rfs_tick = {'cur': start_idx, 'tot': total, 'found': found_total}
     _rfs_tick_ev = threading.Event()
 
+    # Set while run_nvr_split is active so ticker doesn't overwrite its output
+    _rfs_in_split = threading.Event()
+
     def _rfs_ticker():
         while not _rfs_tick_ev.wait(2.0):
+            # Skip printing while NVR split is writing its own output to stdout
+            if _rfs_in_split.is_set():
+                continue
             try:
                 _done = _rfs_tick['cur'] - start_idx
                 _rem  = max(1, _rfs_tick['tot'] - start_idx)
@@ -11347,13 +11353,36 @@ def run_rtsp_file_scan(input_files=None):
                 f"{geo_cc}_{_safe_name(country)}_{_safe_name(region)}_{ip.replace('.','_')}_{port}"
             )
 
-            # ── Full NVR channel split ────────────────────────────────────────
-            ch_count, fname_base = run_nvr_split(
-                ip, port, user, pw,
-                silent=False,
-                output_dir=out_dir,
-                fname_prefix=fname_prefix
-            )
+            # ── Full NVR channel split (hard per-camera timeout) ──────────────
+            _NVR_TIMEOUT = 120   # max seconds per camera before skipping
+            _nvr_result  = [0, '']
+            _nvr_exc     = [None]
+
+            def _do_split():
+                try:
+                    _nvr_result[0], _nvr_result[1] = run_nvr_split(
+                        ip, port, user, pw,
+                        silent=False,
+                        output_dir=out_dir,
+                        fname_prefix=fname_prefix
+                    )
+                except Exception as _e:
+                    _nvr_exc[0] = _e
+
+            _rfs_in_split.set()       # pause ticker — NVR split writes its own output
+            _split_t = threading.Thread(target=_do_split, daemon=True)
+            _split_t.start()
+            _split_t.join(timeout=_NVR_TIMEOUT)
+            _rfs_in_split.clear()     # resume ticker
+
+            if _split_t.is_alive():
+                print(f"\n  {Fore.YELLOW}[⏰] Timeout ({_NVR_TIMEOUT}s) — skipping to next camera{Style.RESET_ALL}")
+                ch_count, fname_base = 0, ''
+            elif _nvr_exc[0]:
+                print(f"  {Fore.RED}[!] Error: {_nvr_exc[0]}{Style.RESET_ALL}")
+                ch_count, fname_base = 0, ''
+            else:
+                ch_count, fname_base = _nvr_result[0], _nvr_result[1]
 
             if ch_count and ch_count > 0:
                 found_total += 1
