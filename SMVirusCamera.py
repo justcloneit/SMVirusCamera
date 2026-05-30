@@ -7078,6 +7078,9 @@ def print_country_menu():
     print(f"\n{C}{'═'*(_CELL_W*_COLS + 4)}{W}")
     print(f"{G}  Select Country  —  {len(COUNTRIES)} countries across 5 RIR regions{W}")
     print(f"{C}{'═'*(_CELL_W*_COLS + 4)}{W}")
+    print(f"  {Fore.GREEN}★{W} CCTV Found + Valid Login   "
+          f"{Fore.YELLOW}★{W} CCTV Found only   "
+          f"  (no star) = not scanned yet")
 
     for rir in rir_order:
         rir_label, rir_color = rir_names[rir]
@@ -7104,13 +7107,18 @@ def print_country_menu():
                     _cc  = f"{_ctry['code']:<{_CODE_W}}"       # "TR"   — 2 chars
                     _nm  = f"{_ctry['name'][:_NAME_W]:<{_NAME_W}}"  # padded — 20 chars
                     # Color-code countries with existing result files
-                    _has_results = any(
-                        os.path.exists(os.path.join(SCRIPT_DIR, f))
-                        for f in os.listdir(SCRIPT_DIR)
-                        if _ctry['code'] in f and ('CCTV_Found' in f or 'ValidCamera' in f)
-                    ) if os.path.isdir(SCRIPT_DIR) else False
-                    _code_color = Fore.GREEN + Style.BRIGHT if _has_results else G
-                    _star       = f"{Fore.GREEN}★{W} " if _has_results else "  "
+                    _dir_files  = os.listdir(SCRIPT_DIR) if os.path.isdir(SCRIPT_DIR) else []
+                    _has_cctv   = any(_ctry['code'] in f and 'CCTV_Found'  in f for f in _dir_files)
+                    _has_valid  = any(_ctry['code'] in f and 'ValidCamera' in f for f in _dir_files)
+                    if _has_cctv and _has_valid:
+                        _code_color = Fore.GREEN  + Style.BRIGHT
+                        _star       = f"{Fore.GREEN}★{W} "
+                    elif _has_cctv:
+                        _code_color = Fore.YELLOW + Style.BRIGHT
+                        _star       = f"{Fore.YELLOW}★{W} "
+                    else:
+                        _code_color = G
+                        _star       = "  "
                     # Assemble: color only wraps plain strings, never padded ones
                     _line += (f"{Y}{_n}{W} "                   # num+dot, 1 space
                               f"{_code_color}{_cc}{W}"         # code
@@ -10199,6 +10207,93 @@ def print_feature_help():
     print(f"{G}   SMVirusCamera — Feature Reference & Help{W}")
     print(f"{C}{'═'*62}{W}")
 
+    # ── Main Menu Options ──────────────────────────────────────────────────────
+    print(f"\n{Y}  MAIN MENU  (options 1-13){W}")
+    print(f"{C}  {'─'*58}{W}")
+    _menu_opts = [
+        ("1",  "Random Camera Scan",
+               "Pick a country, download its IP ranges from the RIR registry, scan all IPs\n"
+               "         for open camera ports.  Detected cameras are saved to CC_CCTV_Found.txt.\n"
+               "         After scanning, login check runs automatically on found cameras."),
+        ("2",  "Login Check from Saved TXT File",
+               "Brute-force credentials against a CC_CCTV_Found.txt you already have.\n"
+               "         Supports multi-file selection.  NVR/DVR devices are auto-split after check.\n"
+               "         Results saved to CC_ValidCamera.txt.  Resumes if interrupted."),
+        ("3",  "IP Range Scan",
+               "Scan a specific CIDR or IP range without downloading a country file."),
+        ("4",  "View All Valid Camera",
+               "List all cameras in any ValidCamera file — username, password, RTSP URL, geo."),
+        ("5",  "Send Result File to Telegram",
+               "Manually push any result .txt file to your configured Telegram bot/channel."),
+        ("6",  "Merge & Deduplicate Result Files",
+               "Combine multiple CCTV_Found / ValidCamera files and remove duplicate IPs."),
+        ("7",  "Password Analysis (Aggregator)",
+               "Rank every password found across all ValidCamera files by hit count."),
+        ("8",  "Credential Success Stats",
+               "Per-credential pair success rate — daily and cumulative breakdowns."),
+        ("9",  "Exit",
+               "Graceful shutdown — saves progress and sends Telegram stop notification."),
+        ("10", "Help & Feature Reference",
+               "This screen."),
+        ("11", "NVR & RTSP Tools  ★ sub-menu",
+               "See NVR & RTSP TOOLS section below."),
+        ("12", "Extra Tools",
+               "RTSP Brute Force, Heatmap, QR Code, CVE Checker, Diff, CSV export and more."),
+        ("13", "RTSP Path Tester",
+               "Single-camera probe, batch from ValidCamera files, M3U export, Quick Re-Test."),
+    ]
+    for _num, _name, _desc in _menu_opts:
+        print(f"  {G}{_num:>2}.{W} {Y}{_name}{W}")
+        print(f"       {_desc}")
+
+    # ── Country Menu — Star Legend ─────────────────────────────────────────────
+    print(f"\n{Y}  COUNTRY MENU — STAR LEGEND{W}")
+    print(f"{C}  {'─'*58}{W}")
+    print(f"  When you select option 1 (Random Camera Scan) a country list is shown.")
+    print(f"  Each country entry may show a coloured star indicating prior scan history:\n")
+    print(f"  {Fore.GREEN}★{W}  (green)   CCTV cameras found  AND  valid logins confirmed")
+    print(f"  {Fore.YELLOW}★{W}  (yellow)  CCTV cameras found, but no valid login results yet")
+    print(f"     (none)    Country has not been scanned in this folder")
+    print(f"\n  Example:  {G}BD{W}{Fore.GREEN}★{W} Bangladesh   — fully completed scan")
+    print(f"            {Y}SV{W}{Fore.YELLOW}★{W} El Salvador  — cameras found, login check pending")
+    print(f"            {G}AR{W}   Argentina    — not scanned yet")
+
+    # ── NVR & RTSP Tools Sub-Menu ─────────────────────────────────────────────
+    print(f"\n{Y}  NVR & RTSP TOOLS  (Option 11 sub-menu){W}")
+    print(f"{C}  {'─'*58}{W}")
+    _nvr_opts = [
+        ("A", "Automatic Mode",
+              "Runs tools 2→4 in sequence with no extra input required."),
+        ("M", "Manual Mode (default)",
+              "Choose individual tools from the list below."),
+        ("1", "NVR Channel Splitter (manual)",
+              "Enter IP:port + credentials; enumerates all channels via ONVIF / Hikvision\n"
+              "         ISAPI / Dahua CGI / Uniview / Axis / Generic RTSP; exports TXT + JSON + M3U;\n"
+              "         full geolocation in all outputs; Telegram alert with channel map."),
+        ("2", "RTSP Channel Scan from ValidCamera files",
+              "Reads your ValidCamera file(s); runs NVR Channel Splitter on every camera.\n"
+              "         Each camera gets a hard 120-second timeout — if no response within 2 minutes\n"
+              "         the scanner skips to the next camera automatically.\n"
+              "         Output: RTSP_Results/<CC>/<CC>_Region_IP_Port_timestamp.{txt,json,m3u}.\n"
+              "         Resume is fully supported — interrupted runs continue from last position.\n"
+              "         Live ticker shows: % done | cameras processed | splits found | speed | ETA."),
+        ("3", "Sort RTSP/NVR files to country folders",
+              "Moves scattered NVR_*.{txt,json,m3u} and CC_RTSP_Found.txt files from\n"
+              "         the root folder into RTSP_Results/<CC>/ sub-folders.\n"
+              "         Country code is resolved from filename: NVR_AT_... → AT/,\n"
+              "         NVR_XX_Afghanistan_... → AF/ (name-to-code lookup)."),
+        ("4", "Deduplicate RTSP files",
+              "Removes older timestamped duplicates, keeping the newest per device."),
+    ]
+    for _num, _name, _desc in _nvr_opts:
+        print(f"  {G}{_num}.{W} {Y}{_name}{W}")
+        print(f"     {_desc}")
+    print(f"\n  {C}Adaptive channel detection:{W}")
+    print(f"  The scanner probes only as many channels as the device actually reports,")
+    print(f"  plus a small buffer.  A 4-channel NVR probes up to 8 slots; a 64-channel")
+    print(f"  NVR probes up to 68.  Only HTTP 200 OK counts as a confirmed channel —")
+    print(f"  401 responses (common on Dahua) are ignored to avoid phantom channels.")
+
     # ── CLI Flags ──────────────────────────────────────────────────────────────
     print(f"\n{Y}  CLI FLAGS{W}   python3 SMVirusCamera.py [flags]")
     print(f"{C}  {'─'*58}{W}")
@@ -11725,6 +11820,9 @@ def sort_rtsp_files_to_folders():
     # separated by underscores) somewhere in the stem, e.g. MY_Johor_180_74_232_100_80
     _IP_IN_NAME = _re_srt.compile(r'_\d{1,3}_\d{1,3}_\d{1,3}_\d{1,3}_')
 
+    # Reverse lookup: "afghanistan" → "AF", "united arab emirates" → "AE", etc.
+    _cc_by_name = {v['name'].lower(): v['code'] for v in COUNTRIES.values()}
+
     candidates = []
     try:
         for fname in sorted(os.listdir(SCRIPT_DIR)):
@@ -11741,8 +11839,30 @@ def sort_rtsp_files_to_folders():
                 # Geo-tagged RTSP file: CC_Region_IP_Port[_ts].ext
                 candidates.append((fpath, fname, m.group(1)))
             elif _re_srt.match(r'^NVR_', fname) and _IP_IN_NAME.search(fname):
-                # NVR file: NVR_IP_Port[_ts].ext
-                candidates.append((fpath, fname, None))
+                # NVR file — format: NVR_CC_CountryName_Region_d_d_d_d_Port.ext
+                # Try to extract a usable 2-letter country code.
+                _nvr_m  = _re_srt.match(r'^NVR_([A-Z]{2})_', fname)
+                _nvr_cc = None
+                if _nvr_m:
+                    _raw_cc = _nvr_m.group(1)
+                    if _raw_cc != 'XX':
+                        # Valid explicit code (AT, AE, AF, …)
+                        _nvr_cc = _raw_cc
+                    else:
+                        # Placeholder XX — parse country name from the rest of filename.
+                        # Format after "NVR_XX_": CountryName_Region_d_d_d_d_Port[_ts].ext
+                        _after  = fname[7:]   # strip "NVR_XX_"
+                        _ip_pos = _IP_IN_NAME.search(_after)
+                        if _ip_pos:
+                            _name_part   = _after[:_ip_pos.start()].rstrip('_')
+                            _name_tokens = _name_part.split('_')
+                            # Try longest→shortest word combination against the name map
+                            for _n in range(len(_name_tokens), 0, -1):
+                                _cand = ' '.join(_name_tokens[:_n]).lower()
+                                if _cand in _cc_by_name:
+                                    _nvr_cc = _cc_by_name[_cand]
+                                    break
+                candidates.append((fpath, fname, _nvr_cc))
     except Exception as e:
         print(f"{R}[!] Error scanning folder: {e}{W}")
         return
@@ -11757,7 +11877,7 @@ def sort_rtsp_files_to_folders():
     print(f"  {len(candidates)} file(s) detected:\n")
 
     for _, fname, cc in candidates[:30]:
-        dest_cc = cc if cc else '??'
+        dest_cc = cc if cc else 'NVR_Misc'
         print(f"  {Y}{fname:<50}{W}  →  RTSP_Results/{dest_cc}/")
     if len(candidates) > 30:
         print(f"  ... and {len(candidates) - 30} more")
