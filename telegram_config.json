@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "send_realtime": true,
+  "send_summary": true,
+  "destinations": [
+    {
+      "name": "Bot 1 - Main Chat",
+      "bot_token": "",
+      "chat_id": "",
+      "enabled": true
+    },
+    {
+      "name": "Bot 2 - Channel/Private",
+      "bot_token": "",
+      "chat_id": "-",
+      "enabled": true
+    },
+    {
+      "name": "Bot 3 - Backup Bot",
+      "bot_token": "",
+      "chat_id": "",
+      "enabled": true
+    }
+  ]
+}
