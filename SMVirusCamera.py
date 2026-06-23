@@ -2670,12 +2670,29 @@ def write_system_log(entry: str):
 
 # Telegram Configuration
 TELEGRAM_CONFIG = {
-    "bot_token": "6507503422:AAGq0dg7s8B7B3KifGWfOZocu0fScXEUp48",
-    "chat_id": "568235637",
-    "enabled": True,
-    "send_realtime": True,
-    "send_summary": True
-}
+                      "enabled": true,
+                      "send_realtime": true,
+                      "send_summary": true,
+                      "destinations": [
+                        {
+                          "name": "Bot 1 - Main Chat",
+                          "bot_token": "6507503422:AAGq0dg7s8B7B3KifGWfOZocu0fScXEUp48",
+                          "chat_id": "568235637",
+                          "enabled": true
+                        },
+                        {
+                          "name": "Bot 2 - Channel/Private",
+                          "bot_token": "6507503422:AAGq0dg7s8B7B3KifGWfOZocu0fScXEUp48",
+                          "chat_id": "-1003757607806",
+                          "enabled": true
+                        },
+                        {
+                          "name": "Bot 3 - Backup Bot",
+                          "bot_token": "8684626968:AAFujEXXnwubxJ5tqvmQA8yE8u6IudpZf54",
+                          "chat_id": "7988300610",
+                          "enabled": true
+                        }
+  ]
 
 def load_telegram_config():
     """Load Telegram configuration from file or environment variables"""
@@ -2724,7 +2741,7 @@ def load_telegram_config():
 
 telegram_queue = queue.Queue(maxsize=500)
 telegram_worker_thread    = None
-_telegram_cmd_thread      = None
+_telegram_cmd_threads     : dict = {}   # bot_token → Thread (one per unique token)
 _telegram_cmd_thread_lock = threading.Lock()
 _telegram_batch_lock = threading.RLock()
 _telegram_camera_batch = []
@@ -3459,24 +3476,18 @@ def _telegram_cmd_reply(bot_token: str, chat_id: str, text: str) -> None:
         pass
 
 
-def _telegram_cmd_worker() -> None:
-    """Long-polling background thread that reads incoming Telegram messages
-    and responds to bot commands instantly.
+def _telegram_cmd_worker(bot_token: str) -> None:
+    """Long-polling background thread for ONE bot token.
 
-    Supported commands
-    ------------------
-    /status  — live scan progress (mode, country, progress %, speed, ETA, error rate)
-    /help    — list of available commands
+    start_telegram_cmd_handler() launches one of these per unique token so that
+    commands sent to any configured bot are received — not just the first one.
 
-    Security: only chat_ids already listed in TELEGRAM_CONFIG destinations are
-    answered — strangers are silently ignored even if they know the bot token.
-
-    The thread uses Telegram's long-polling (getUpdates?timeout=30) which blocks
-    the HTTP request on Telegram's side for up to 30 s when there are no messages,
-    so it consumes essentially no CPU while idle.
+    Security: only chat_ids listed in TELEGRAM_CONFIG destinations are answered.
+    The reply always uses the same token that received the message.
     """
     offset       = 0
     poll_timeout = 30
+    own_bot_id   = bot_token.split(':')[0]   # numeric ID, used for @mention matching
 
     def _allowed_ids() -> set:
         return {
@@ -3485,21 +3496,21 @@ def _telegram_cmd_worker() -> None:
             if d.get("enabled", True) and d.get("chat_id")
         }
 
-    def _first_active_dest():
-        for d in TELEGRAM_CONFIG.get("destinations", []):
-            if d.get("enabled", True) and d.get("bot_token") and d.get("chat_id"):
-                return d
-        return None
-
     while True:
         try:
-            dest = _first_active_dest()
-            if not dest:
+            # Stop looping if this token has been removed from config
+            if not TELEGRAM_CONFIG.get("enabled"):
                 time.sleep(10)
                 continue
+            _token_still_active = any(
+                d.get("enabled", True) and d.get("bot_token") == bot_token
+                for d in TELEGRAM_CONFIG.get("destinations", [])
+            )
+            if not _token_still_active:
+                time.sleep(30)
+                continue
 
-            bot_token = dest["bot_token"]
-            poll_url  = (f"https://api.telegram.org/bot{bot_token}/getUpdates")
+            poll_url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
 
             try:
                 session = _get_telegram_session()
@@ -3545,18 +3556,8 @@ def _telegram_cmd_worker() -> None:
                 if from_chat not in allowed:
                     continue
 
-                # Find the matching destination so we reply with the right token
-                reply_dest = next(
-                    (d for d in TELEGRAM_CONFIG.get("destinations", [])
-                     if d.get("enabled", True)
-                     and str(d.get("chat_id", "")) == from_chat
-                     and d.get("bot_token")),
-                    None,
-                )
-                if not reply_dest:
-                    continue
-
-                reply_token = reply_dest["bot_token"]
+                # Reply with the same token that received the message
+                reply_token = bot_token
                 cmd = text.split()[0].lower() if text.startswith("/") else ""
 
                 if cmd in ("/status", f"/status@{bot_token.split(':')[0]}"):
@@ -4056,16 +4057,35 @@ def _telegram_cmd_worker() -> None:
 
 
 def start_telegram_cmd_handler() -> None:
-    """Start the Telegram command-polling thread (idempotent — safe to call many times)."""
-    global _telegram_cmd_thread
+    """Launch one long-poll thread per unique bot token (idempotent).
+
+    Previously a single thread only watched the first token — commands sent to
+    any other bot were never seen.  Now every unique token gets its own thread
+    so all configured bots can receive and respond to commands simultaneously.
+    """
+    global _telegram_cmd_threads
     if not TELEGRAM_CONFIG.get("enabled"):
         return
+    # Collect every unique, enabled bot token across all destinations
+    _seen_tokens: set = set()
+    _unique_tokens: list = []
+    for _d in TELEGRAM_CONFIG.get("destinations", []):
+        _tok = _d.get("bot_token", "")
+        if _d.get("enabled", True) and _tok and _tok not in _seen_tokens:
+            _seen_tokens.add(_tok)
+            _unique_tokens.append(_tok)
     with _telegram_cmd_thread_lock:
-        if _telegram_cmd_thread is None or not _telegram_cmd_thread.is_alive():
-            _telegram_cmd_thread = threading.Thread(
-                target=_telegram_cmd_worker, daemon=True, name="TgCmdHandler"
-            )
-            _telegram_cmd_thread.start()
+        for _tok in _unique_tokens:
+            _existing = _telegram_cmd_threads.get(_tok)
+            if _existing is None or not _existing.is_alive():
+                _t = threading.Thread(
+                    target=_telegram_cmd_worker,
+                    args=(_tok,),
+                    daemon=True,
+                    name=f"TgCmd_{_tok[:8]}",   # first 8 chars of token for thread name
+                )
+                _t.start()
+                _telegram_cmd_threads[_tok] = _t
 
 
 def send_telegram_file_blocking(file_path: str, caption: str = "", retries: int = 3):
