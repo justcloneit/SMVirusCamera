@@ -2670,29 +2670,12 @@ def write_system_log(entry: str):
 
 # Telegram Configuration
 TELEGRAM_CONFIG = {
-                      "enabled": true,
-                      "send_realtime": true,
-                      "send_summary": true,
-                      "destinations": [
-                        {
-                          "name": "Bot 1 - Main Chat",
-                          "bot_token": "6507503422:AAGq0dg7s8B7B3KifGWfOZocu0fScXEUp48",
-                          "chat_id": "568235637",
-                          "enabled": true
-                        },
-                        {
-                          "name": "Bot 2 - Channel/Private",
-                          "bot_token": "6507503422:AAGq0dg7s8B7B3KifGWfOZocu0fScXEUp48",
-                          "chat_id": "-1003757607806",
-                          "enabled": true
-                        },
-                        {
-                          "name": "Bot 3 - Backup Bot",
-                          "bot_token": "8684626968:AAFujEXXnwubxJ5tqvmQA8yE8u6IudpZf54",
-                          "chat_id": "7988300610",
-                          "enabled": true
-                        }
-  ]
+    "bot_token": "6507503422:AAGq0dg7s8B7B3KifGWfOZocu0fScXEUp48",
+    "chat_id": "568235637",
+    "enabled": True,
+    "send_realtime": True,
+    "send_summary": True
+}
 
 def load_telegram_config():
     """Load Telegram configuration from file or environment variables"""
@@ -3560,7 +3543,40 @@ def _telegram_cmd_worker(bot_token: str) -> None:
                 reply_token = bot_token
                 cmd = text.split()[0].lower() if text.startswith("/") else ""
 
-                if cmd in ("/status", f"/status@{bot_token.split(':')[0]}"):
+                if cmd in ("/ping", f"/ping@{bot_token.split(':')[0]}"):
+                    _telegram_cmd_reply(
+                        reply_token, from_chat,
+                        "🏓 <b>Pong!</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"✅ Bot is alive and listening.\n"
+                        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+
+                elif cmd in ("/uptime", f"/uptime@{bot_token.split(':')[0]}"):
+                    _elapsed   = time.time() - start_time
+                    _days      = int(_elapsed // 86400)
+                    _hours     = int((_elapsed % 86400) // 3600)
+                    _mins      = int((_elapsed % 3600) // 60)
+                    _secs      = int(_elapsed % 60)
+                    if _days:
+                        _up_str = f"{_days}d {_hours}h {_mins}m {_secs}s"
+                    elif _hours:
+                        _up_str = f"{_hours}h {_mins}m {_secs}s"
+                    else:
+                        _up_str = f"{_mins}m {_secs}s"
+                    _launched  = datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')
+                    _thr_count = threading.active_count()
+                    _telegram_cmd_reply(
+                        reply_token, from_chat,
+                        f"⏱ <b>Server Uptime</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🟢 Running for: <b>{_up_str}</b>\n"
+                        f"🚀 Started at: {_launched}\n"
+                        f"🧵 Active threads: {_thr_count}\n"
+                        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+
+                elif cmd in ("/status", f"/status@{bot_token.split(':')[0]}"):
                     _telegram_cmd_reply(reply_token, from_chat, _build_status_message())
 
                 elif cmd in ("/list", "/files",
@@ -4036,6 +4052,8 @@ def _telegram_cmd_worker(bot_token: str) -> None:
                     help_text = (
                         "🤖 <b>SMVirusCamera Bot Commands</b>\n"
                         "━━━━━━━━━━━━━━━━━━━━━━\n"
+                        "/ping            — Check if bot is alive\n"
+                        "/uptime          — How long the server has been running\n"
                         "/status          — Live scan progress\n"
                         "                   mode · country · % · speed · ETA\n"
                         "/scan &lt;CC&gt;       — Start scan for country code\n"
