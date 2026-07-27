@@ -17077,6 +17077,17 @@ def tools_submenu() -> None:
                     try:
                         _act23 = input(f"{G}Action (a/s/b): {W}").strip().lower()
 
+                        # ── Dedicated 4G/5G output file ───────────────────────
+                        _4g_cc_label = _cc23 if _cc23 else 'ALL'
+                        _4g_out_file = os.path.join(
+                            SCRIPT_DIR,
+                            f"{_4g_cc_label}_4G5G_ValidCamera.txt"
+                        )
+                        global cctv_output_file
+                        _prev_output = cctv_output_file
+                        cctv_output_file = _4g_out_file
+                        print(f"{C}[4G/5G] Results → {os.path.basename(_4g_out_file)}{W}")
+
                         if _act23 == 'a':
                             # ── Scan ALL ranges one by one ─────────────────────────────
                             _creds23 = _merge_4g_creds(load_credentials())
@@ -17096,6 +17107,7 @@ def tools_submenu() -> None:
                                 except Exception as _e23err:
                                     print(f"{R}[!] Skipped {_cidr23}: {_e23err}{W}")
                             print(f"\n{G}[✓] All {len(_ranges23)} 4G/5G ranges scanned.{W}")
+                            print(f"{G}[✓] Results saved → {_4g_out_file}{W}")
 
                         elif _act23 == 's':
                             print(f"  {Y}Enter a number (e.g. 4), a range (e.g. 4-11), or comma list (e.g. 1,3,5){W}")
@@ -17125,8 +17137,11 @@ def tools_submenu() -> None:
                                         _e23 = str(_hs23[-1])
                                         print(f"{C}[4G/5G Scan {_si23+1}] {_tcc23s} {_sel23} → {_s23} – {_e23}{W}")
                                         scan_ip_range(_s23, _e23, _creds23s)
+                                print(f"{G}[✓] Results saved → {_4g_out_file}{W}")
                             except (IndexError, ValueError) as _e23err:
                                 print(f"{R}[!] Error: {_e23err}{W}")
+
+                        cctv_output_file = _prev_output  # restore previous output file
                     except (EOFError, KeyboardInterrupt):
                         pass
             except (EOFError, KeyboardInterrupt):
