@@ -657,6 +657,10 @@ _cli_port_override: list = []
 
 # Global results storage (thread-safe)
 results_lock = threading.Lock()
+# Result files are written by many scan workers at once.  Keep each camera
+# record together and make sure a successful hit cannot be lost between
+# concurrent append operations.
+result_file_lock = threading.Lock()
 valid_results = []
 scanned_count = 0
 _global_cameras_found = 0   # live counter — shown in scan progress bar
@@ -698,7 +702,7 @@ _cli_scan_timeout: float = 0.15
 
 # Anti-freeze: if no future completes within this many seconds, skip hanging IPs
 _SCAN_STALL_TIMEOUT: int = 90   # seconds to wait before declaring a stall
-_SCAN_SUBBATCH:      int = 256   # IPs per mini-batch inside scan_ip_range();
+_SCAN_SUBBATCH:      int = 2048   # IPs per mini-batch inside scan_ip_range();
                                  # keeps TPE queue small so huge CIDRs cannot
                                  # OOM-kill the process. Checkpointed per batch.
 
@@ -956,7 +960,7 @@ _lockout_cd_lock = threading.Lock()
 
 # ── Quick-scan mode (--quick: only 4 most common ports) ───────────────────────
 _quick_scan_mode: bool = False
-_QUICK_PORTS = [80, 554, 8080, 37777]
+_QUICK_PORTS = [80, 23, 554, 5060, 8080, 8554, 34567, 37777]
 
 # ── Ports specific to 4G/5G modem-attached cameras ─────────────────────────────
 # Extends the default scan list with ports commonly found on mobile-carrier IPs:
@@ -968,7 +972,7 @@ _4G_PORTS: list = [
     8000, 8080, 8081, 8082, 8083, 8084, 8085, 8090, 8091,  # HTTP alt
     8200, 8888, 9000, 9001,    # Common cam HTTP variants
     37777, 37778, 37779,       # Dahua SDK
-    34567, 4567,               # Generic DVR
+    34567, 4567,               # Generic DVR / XMEye
     4000, 4321,                # DVR/NVR mgmt
     2000, 2001,                # DVR serial / mgmt
     7080,                      # ONVIF
@@ -978,7 +982,8 @@ _4G_PORTS: list = [
     6789,                      # Huawei / ZTE
     50000, 50001,              # P2P cloud cameras
     1024, 1025, 1050, 3000,    # Misc cam ports
-    554, 8554, 10554,          # RTSP (port-open detection only)
+    23, 5060,                  # Telnet / SIP intercom
+    554, 8554, 9527, 10554,    # RTSP / recorder service
     52869,                     # UPNP (common on modem-attached cams)
 ]
 
@@ -1518,6 +1523,61 @@ def try_exploit_cve(ip: str, port: int, camera_type: str, timeout: float = 4.0) 
     return results
 
 
+def _save_valid_camera_result(ip: str, port: int, username: str, password: str,
+                              camera_type: str, url: str = "",
+                              country_name: str = "", country_code: str = "",
+                              message: str = "") -> bool:
+    """Append one authenticated camera to the active result file.
+
+    The range scanner runs this code from worker threads.  The old fast path
+    only returned the result to the progress loop, so it could print
+    ``CAMERA FOUND`` without persisting anything.  Keep file creation and
+    appending here so every authenticated hit follows the same path.
+    """
+    output_path = cctv_output_file
+    if not output_path:
+        print(f"{Fore.RED}[!] Camera result not saved: no output file is configured "
+              f"({ip}:{port}){Style.RESET_ALL}")
+        return False
+
+    output_path = os.path.abspath(output_path)
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    record = [
+        f"{'=' * 60}\n",
+        f"Camera Type: {camera_type}\n",
+        f"IP Address: {ip}\n",
+        f"Port: {port}\n",
+        f"URL: {url or f'http://{ip}'}\n",
+        f"Country Name: {country_name or current_country_name}\n",
+        f"Country Code: {country_code or current_country_code}\n",
+    ]
+    if username:
+        record.append(f"Username: {username}\n")
+    if password:
+        record.append(f"Password: {password}\n")
+    if message:
+        record.append(f"Login Message: {message}\n")
+    record.extend([
+        f"Detection Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
+        f"{'=' * 60}\n\n",
+    ])
+
+    try:
+        with result_file_lock:
+            with open(output_path, 'a', encoding='utf-8') as file:
+                file.writelines(record)
+                file.flush()
+                os.fsync(file.fileno())
+        return True
+    except Exception as exc:
+        print(f"{Fore.RED}[!] Could not save camera result to "
+              f"{output_path}: {exc}{Style.RESET_ALL}")
+        return False
+
+
 def _post_camera_found(ip: str, port: int, username: str, password: str,
                        camera_type: str, open_ports: list) -> None:
     """Snapshot + CVE after camera confirmed in scan_single_ip() (fast scan path).
@@ -2051,17 +2111,107 @@ _CYBER_FACTS = [
     "In 2025, MITRE added 'Insecure Default Initialization' (CWE-1188) as a top-25 weakness — cameras dominate.",
     "WireGuard VPN tunnels are now supported by ~12% of NVR brands as of 2025, improving remote access security.",
     "A Censys scan (Jan 2026) found 2.1 million publicly accessible RTSP streams — up 18% from 2024.",
+    "If a scan reports thousands of futures frozen for 90 seconds, bounded timeouts, "
+    "small submission batches, and a progress heartbeat help isolate slow network paths "
+    "without waiting forever.",
 ]
 
-def random_cyber_fact() -> str:
-    return _rnd.choice(_CYBER_FACTS)
+CYBER_FACT_CACHE = os.path.join(SCRIPT_DIR, 'cyber_facts_daily.json')
+CYBER_FACT_TTL = 24 * 60 * 60
+CYBER_FACT_SOURCES = (
+    ('CISA advisories', 'https://www.cisa.gov/cybersecurity-advisories/all.xml'),
+    ('NVD IP camera CVEs',
+     'https://services.nvd.nist.gov/rest/json/cves/2.0'
+     '?keywordSearch=ip%20camera&resultsPerPage=20'),
+    ('OWASP IoT guidance', 'https://owasp.org/www-project-internet-of-things/'),
+)
 
-def show_random_fact(count: int = 3) -> None:
-    """Display `count` random cyber facts automatically — no keypress required."""
+def _refresh_online_cyber_facts(force: bool = False) -> list:
+    """Refresh advisory titles once per day; return safe, defensive learning items."""
+    now = time.time()
+    cached = {}
+    try:
+        with open(CYBER_FACT_CACHE, encoding='utf-8') as _fh:
+            cached = json.load(_fh)
+    except (OSError, ValueError, TypeError):
+        pass
+    if (not force and cached.get('updated_at', 0) and
+            now - float(cached['updated_at']) < CYBER_FACT_TTL):
+        # Older cache writers stored dictionaries; normalize them so the
+        # display remains readable after an upgrade.
+        return [
+            item if isinstance(item, str) else item.get('fact', '')
+            for item in cached.get('online', [])
+            if isinstance(item, str) or isinstance(item, dict)
+        ]
+
+    online = []
+    for source, url in CYBER_FACT_SOURCES:
+        try:
+            _resp = requests.get(
+                url, timeout=6,
+                headers={'User-Agent': 'SMVirusCamera-defensive-facts/1.0'})
+            if _resp.status_code != 200:
+                continue
+            if url.endswith('.xml'):
+                import xml.etree.ElementTree as _fact_et
+                _root = _fact_et.fromstring(_resp.text[:400000])
+                _titles = [
+                    _node.text.strip() for _node in _root.iter()
+                    if _node.tag.rsplit('}', 1)[-1].lower() == 'title'
+                    and _node.text and _node.text.strip()
+                ]
+                for _title in _titles[1:6]:
+                    online.append(
+                        f'Fresh {source} item: {_title[:200]}. Review the advisory, '
+                        f'check whether your model is affected, and apply vendor guidance. '
+                        f'[{url}]')
+            elif 'nvd.nist.gov' in url:
+                _data = _resp.json()
+                for _item in _data.get('vulnerabilities', [])[:6]:
+                    _cve = _item.get('cve', {})
+                    _desc = next(
+                        (_d.get('value', '') for _d in _cve.get('descriptions', [])
+                         if _d.get('lang') == 'en'), '')
+                    if _desc:
+                        _cid = _cve.get('id', 'CVE')
+                        online.append(
+                            f'Fresh {source} item: {_cid} — {_desc[:200]}. '
+                            f'Confirm the exact firmware before patching. '
+                            f'[https://nvd.nist.gov/vuln/detail/{_cid}]')
+            else:
+                online.append(
+                    f'{source}: recurring IoT risks include weak credentials, '
+                    f'insecure updates, and exposed services. Use its guidance to '
+                    f'harden cameras and NVRs. [{url}]')
+        except Exception:
+            # Public feeds are optional and must never interrupt a scan.
+            continue
+    try:
+        with open(CYBER_FACT_CACHE, 'w', encoding='utf-8') as _fh:
+            json.dump({'updated_at': now, 'online': online}, _fh,
+                      indent=2, ensure_ascii=False)
+    except OSError:
+        pass
+    return online
+
+def random_cyber_fact() -> str:
+    _online = _refresh_online_cyber_facts()
+    return _rnd.choice(_CYBER_FACTS + _online)
+
+def show_random_fact(count: int = 3, refresh: bool = False) -> None:
+    """Display random defensive facts; online sources refresh at most daily."""
     import random as _r2
     C, Y, W = Fore.CYAN, Fore.YELLOW, Style.RESET_ALL
-    chosen = _r2.sample(_CYBER_FACTS, min(count, len(_CYBER_FACTS)))
+    _online = _refresh_online_cyber_facts(force=refresh)
+    _all_facts = _CYBER_FACTS + [
+        item if isinstance(item, str) else item.get('fact', '')
+        for item in _online
+    ]
+    _all_facts = [item for item in _all_facts if item]
+    chosen = _r2.sample(_all_facts, min(count, len(_all_facts)))
     print(f"\n{C}{'─'*66}{W}")
+    print(f"  {Y}Daily IP camera / CCTV / NVR cyber facts{W}")
     for i, fact in enumerate(chosen, 1):
         print(f"  {Y}💡 Fact #{i}:{W} {fact}")
     print(f"{C}{'─'*66}{W}\n")
@@ -7481,7 +7631,8 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
 
 
 def scan_single_ip(ip: str, credentials: List[Tuple[str, str]],
-                   ports: List[int]) -> Optional[dict]:
+                   ports: List[int], country_name: str = "Unknown",
+                   country_code: str = "XX") -> Optional[dict]:
     """
     Scan a single IP address for cameras and try to login.
     scanned_count is incremented exactly once via try/finally regardless of
@@ -7582,6 +7733,15 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]],
                         'port': detected_port, 'message': message,
                         'open_ports': open_ports,
                     }
+                    _save_valid_camera_result(
+                        ip, detected_port, username, password,
+                        'HIK Vision Camera',
+                        url=f"http://{ip}:{detected_port}" if detected_port in (8080, 8000)
+                        else f"http://{ip}",
+                        country_name=country_name,
+                        country_code=country_code,
+                        message=message,
+                    )
                     _post_camera_found(ip, detected_port, username, password,
                                        'HIK Vision Camera', open_ports)
                     return _result
@@ -7608,6 +7768,15 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]],
                         'port': detected_port, 'message': message,
                         'open_ports': open_ports,
                     }
+                    _save_valid_camera_result(
+                        ip, detected_port, username, password,
+                        'Anjhua-Dahua Technology Camera',
+                        url=f"http://{ip}:{detected_port}" if detected_port in (8080, 8000)
+                        else f"http://{ip}",
+                        country_name=country_name,
+                        country_code=country_code,
+                        message=message,
+                    )
                     return _result
 
         print(
@@ -7855,7 +8024,9 @@ def scan_ip_range(start_ip: str,
                   max_workers: int = None,
                   cidr_total_ips: int = 0,
                   cidr_offset: int = 0,
-                  resume_from_ip: str = ""):
+                  resume_from_ip: str = "",
+                  country_name: str = "Unknown",
+                  country_code: str = "XX"):
     """
     Scan IP range for cameras with multi-threaded support
     
@@ -7903,7 +8074,8 @@ def scan_ip_range(start_ip: str,
         8200, 8888, 9000, 9001,
         # ── Dahua SDK / DVR ports ────────────────────────────────────────
         37777, 37778, 37779,
-        34567, 4567,          # Generic DVR
+        23, 5060,             # Telnet / SIP intercom
+        34567, 4567,          # Generic DVR / XMEye
         4000, 4321,           # DVR/NVR mgmt
         2000, 2001,           # DVR serial / mgmt
         # ── Brand-specific ports ─────────────────────────────────────────
@@ -7916,7 +8088,7 @@ def scan_ip_range(start_ip: str,
         # ── Misc ─────────────────────────────────────────────────────────
         1024, 1025, 1050, 3000,
         # ── RTSP (port-open detection only) ──────────────────────────────
-        554, 8554, 10554, 5554, 7554,
+        554, 8554, 9527, 10554, 5554, 7554,
     ]  # 45 ports — extended camera port list
     if _quick_scan_mode:
         ports_to_scan = _QUICK_PORTS
@@ -8035,7 +8207,10 @@ def scan_ip_range(start_ip: str,
             for ip in _sb_batch:
                 for _retry in range(5):
                     try:
-                        future_to_ip[executor.submit(scan_single_ip, ip, credentials, ports_to_scan)] = ip
+                        future_to_ip[executor.submit(
+                            scan_single_ip, ip, credentials, ports_to_scan,
+                            country_name, country_code
+                        )] = ip
                         break
                     except RuntimeError:
                         time.sleep(2 ** _retry * 0.5)
@@ -8521,7 +8696,8 @@ def scan_country_cameras(country: dict,
         8200, 8888, 9000, 9001,
         # ── Dahua SDK / DVR ports ────────────────────────────────────────
         37777, 37778, 37779,
-        34567, 4567,          # Generic DVR
+        23, 5060,             # Telnet / SIP intercom
+        34567, 4567,          # Generic DVR / XMEye
         4000, 4321,           # DVR/NVR mgmt
         2000, 2001,           # DVR serial / mgmt
         # ── Brand-specific ports ─────────────────────────────────────────
@@ -8534,7 +8710,7 @@ def scan_country_cameras(country: dict,
         # ── Misc ─────────────────────────────────────────────────────────
         1024, 1025, 1050, 3000,
         # ── RTSP (port-open detection only) ──────────────────────────────
-        554, 8554, 10554, 5554, 7554,
+        554, 8554, 9527, 10554, 5554, 7554,
     ]  # 45 ports — extended camera port list
     if _quick_scan_mode:
         ports_to_scan = _QUICK_PORTS
@@ -10914,7 +11090,8 @@ def scan_country_cameras_detection_only(country: dict,
         8200, 8888, 9000, 9001,
         # ── Dahua SDK / DVR ports ────────────────────────────────────────
         37777, 37778, 37779,
-        34567, 4567,          # Generic DVR
+        23, 5060,             # Telnet / SIP intercom
+        34567, 4567,          # Generic DVR / XMEye
         4000, 4321,           # DVR/NVR mgmt
         2000, 2001,           # DVR serial / mgmt
         # ── Brand-specific ports ─────────────────────────────────────────
@@ -10927,7 +11104,7 @@ def scan_country_cameras_detection_only(country: dict,
         # ── Misc ─────────────────────────────────────────────────────────
         1024, 1025, 1050, 3000,
         # ── RTSP (port-open detection only) ──────────────────────────────
-        554, 8554, 10554, 5554, 7554,
+        554, 8554, 9527, 10554, 5554, 7554,
     ]  # 45 ports — extended camera port list
     if _quick_scan_mode:
         ports_to_scan = _QUICK_PORTS
@@ -11637,6 +11814,8 @@ def print_feature_help():
         ("--export-stats PATH","Export credential stats to CSV with First/Last Hit Date columns"),
         ("--since YYYY-MM-DD","Filter --stats / --export-stats to hits on or after this date"),
         ("--watch N",          "Refresh --stats live every N seconds (Ctrl+C stops)"),
+        ("--cyber-fact",       "Print daily-updated defensive IP-camera facts and exit"),
+        ("--refresh-cyber-fact", "Refresh public CISA/NVD/OWASP sources before printing facts"),
         ("--log-file PATH",    "Tee all console output to a log file alongside terminal"),
         ("--schedule HHMM",   "Wait until HH:MM then start the scan (e.g. --schedule 0200)"),
         ("--blacklist CC,...", "Add country codes to persistent skip list for --multi-country"),
@@ -18201,7 +18380,9 @@ def tools_submenu() -> None:
                                         scan_ip_range(
                                             _cs23, _ce23, _creds23,
                                             cidr_total_ips=_cidr_total23 if _ctot23 > 1 else 0,
-                                            cidr_offset=_cidr_off23 if _ctot23 > 1 else 0)
+                                            cidr_offset=_cidr_off23 if _ctot23 > 1 else 0,
+                                            country_name=_tcc23,
+                                            country_code=_tcc23)
                                         _cidr_off23 += _blk23
                                 except Exception as _e23err:
                                     print(f"{R}[!] Skipped {_cidr23}: {_e23err}{W}")
@@ -18258,7 +18439,9 @@ def tools_submenu() -> None:
                                             scan_ip_range(
                                                 _cs23s, _ce23s, _creds23s,
                                                 cidr_total_ips=_cidr_total23s if _ctot23s > 1 else 0,
-                                                cidr_offset=_cidr_off23s if _ctot23s > 1 else 0)
+                                                cidr_offset=_cidr_off23s if _ctot23s > 1 else 0,
+                                                country_name=_tcc23s,
+                                                country_code=_tcc23s)
                                             _cidr_off23s += _blk23s
                                 print(f"{G}[✓] Results saved → {_4g_out_file}{W}")
                             except (IndexError, ValueError) as _e23err:
@@ -18681,6 +18864,14 @@ def tools_submenu() -> None:
 def main():
     """Main function with menu"""
     global start_time, scanned_count, total_ips, valid_results
+
+    # Fast daily-learning mode: do not initialize dependencies, resume prompts,
+    # Telegram workers, or scan state when the operator only wants a fact.
+    if '--cyber-fact' in sys.argv or '--refresh-cyber-fact' in sys.argv:
+        show_random_fact(
+            count=5,
+            refresh='--refresh-cyber-fact' in sys.argv)
+        return
 
     # ── Startup init ──────────────────────────────────────────────────────────
     # Global socket default timeout: ensures every socket that does NOT call
@@ -19482,7 +19673,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             sys.exit(1)
 
         # Full camera port set
-        _PS_PORTS   = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
+        _PS_PORTS   = [23, 80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 5060, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         _PS_TIMEOUT = 1.5
         _PS_WORKERS = 200
 
@@ -22214,7 +22405,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
         _fca_target   = sys.argv[_fca_idx + 1]
         _fca_timeout  = 1.0
         _fca_threads  = 200
-        _fca_ports    = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
+        _fca_ports    = [23, 80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 5060, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         if '--timeout' in sys.argv:
             try: _fca_timeout = float(sys.argv[sys.argv.index('--timeout') + 1])
             except: pass
@@ -24191,7 +24382,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             print(f"{R}[!] Invalid CIDR: {_sr_cidr}  ({_srve}){W}")
             sys.exit(1)
         _sr_ips   = [str(h) for h in _sr_net.hosts()]
-        _sr_ports = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
+        _sr_ports = [23, 80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 5060, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         _sr_workers = 150
         if '--threads' in sys.argv:
             try:
@@ -24290,7 +24481,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
         except ValueError as _srhe:
             print(f"{R}[!] Invalid CIDR: {_srh_cidr}  ({_srhe}){W}"); sys.exit(1)
         _srh_ips     = [str(h) for h in _srh_net.hosts()]
-        _srh_ports   = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
+        _srh_ports   = [23, 80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 5060, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         _srh_workers = 150
         if '--threads' in sys.argv:
             try:
@@ -24914,7 +25105,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
 
         # 1. Port scan
         _rep(f"\n[1/5] Port Scan", C)
-        _rep_probe_ports = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
+        _rep_probe_ports = [23, 80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 5060, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         _open = fast_port_scan(_rep_ip, _rep_probe_ports, timeout=1.0)
         if _open:
             _rep(f"  Open ports : {', '.join(str(p) for p in _open)}", G)
@@ -25192,7 +25383,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
                 return res
             # 1 ports
             res['open'] = fast_port_scan(
-                ip, [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567],
+                ip, [23, 80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 5060, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567],
                 timeout=1.0)
             # 2 type
             _bcf, _bct = detect_camera_via_http(ip, port)
@@ -25625,7 +25816,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
             if not ip: return res
             # 1 port scan
             res['open'] = fast_port_scan(
-                ip, [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567],
+                ip, [23, 80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 5060, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567],
                 timeout=1.0)
             # 2 type detect
             _acf, _act = detect_camera_via_http(ip, port)
@@ -25922,7 +26113,7 @@ footer{{color:#484f58;margin-top:32px;font-size:.85em}}</style></head><body>
         print(f"{C}{'═'*70}{W}")
         # Stage 1: port scan
         print(f"  {C}[1/5] Port scan ...{W}", end='', flush=True)
-        _rh_probe_ports = [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
+        _rh_probe_ports = [23, 80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 5060, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         _rh_open = fast_port_scan(_rh_ip, _rh_probe_ports, timeout=1.0)
         print(f" {G}done{W}")
         # Stage 2: camera type
@@ -28628,6 +28819,10 @@ if (CAMERAS.length > 0) {{
                          help='Export credential stats to CSV with First/Last Hit Date columns')
     _parser.add_argument('--watch',        metavar='N', type=int, default=None,
                          help='Live-refresh --stats every N seconds')
+    _parser.add_argument('--cyber-fact', action='store_true', default=False,
+                         help='Print daily-updated defensive IP-camera facts and exit')
+    _parser.add_argument('--refresh-cyber-fact', action='store_true', default=False,
+                         help='Refresh public CISA/NVD/OWASP fact sources before printing')
     _parser.add_argument('--since',           metavar='YYYY-MM-DD', default=None,
                          help='Filter --stats / --export-stats to hits on or after this date')
     _parser.add_argument('--schedule',        metavar='HHMM', default=None,
@@ -28774,6 +28969,12 @@ if (CAMERAS.length > 0) {{
     global _CLI_ARGS
     _CLI_ARGS = _args
 
+    # A fast, non-scanning daily learning mode.  Keep this after argument
+    # parsing so it works from scheduled jobs without entering the menu.
+    if _args.cyber_fact or _args.refresh_cyber_fact:
+        show_random_fact(count=5, refresh=_args.refresh_cyber_fact)
+        sys.exit(0)
+
     # ── Apply --admin-account override ───────────────────────────────────────
     global _ADMIN_ACCOUNT_NAME
     if getattr(_args, 'admin_account', 'admin') != 'admin':
@@ -28808,10 +29009,10 @@ if (CAMERAS.length > 0) {{
             'reolink':   [80, 443, 554, 9000, 8554],
             'uniview':   [80, 443, 554, 6060, 8554],
             'hanwha':    [80, 8080, 443, 4520, 554, 8554],
-            'common':    [80, 443, 554, 1050, 3000, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 34567, 37777, 37778, 37779],
+            'common':    [23, 80, 443, 554, 5060, 1050, 3000, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8554, 8888, 9000, 34567, 37777, 37778, 37779],
             'rtsp':      [554, 8554, 10554, 1024, 5554, 7554, 34567, 37778, 37779],
             'http':      [80, 443, 1025, 1050, 3000, 8000, 8080, 8081, 8082, 8083, 8084, 8085, 8200, 8443, 8888, 9000],
-            'all':       [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567],
+            'all':       [23, 80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 5060, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567],
         }
         _ppname = _args.port_profile.lower().strip()
         if _ppname not in _PORT_PROFILES:
@@ -28910,7 +29111,7 @@ if (CAMERAS.length > 0) {{
         print(f"  {Y}Country     {W}: {_dr_cstr}")
 
         # Ports
-        _dr_ports = _cli_port_override if _cli_port_override else [80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
+        _dr_ports = _cli_port_override if _cli_port_override else [23, 80, 8000, 8080, 8081, 8082, 37777, 37778, 37779, 554, 5060, 8554, 443, 8443, 10554, 5554, 7554, 8083, 8084, 8085, 8200, 8888, 9000, 1024, 1025, 1050, 3000, 34567]
         print(f"  {Y}Ports       {W}: {', '.join(str(p) for p in _dr_ports)}")
 
         # Threads
