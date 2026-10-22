@@ -1536,9 +1536,8 @@ def _save_valid_camera_result(ip: str, port: int, username: str, password: str,
     """
     output_path = cctv_output_file
     if not output_path:
-        print(f"{Fore.RED}[!] Camera result not saved: no output file is configured "
-              f"({ip}:{port}){Style.RESET_ALL}")
-        return False
+        output_path = os.path.join(SCRIPT_DIR, "IPRangeCCTVFound.txt")
+        print(f"{Fore.YELLOW}[!] No output file configured; using fallback: {output_path}{Style.RESET_ALL}")
 
     output_path = os.path.abspath(output_path)
     output_dir = os.path.dirname(output_path)
