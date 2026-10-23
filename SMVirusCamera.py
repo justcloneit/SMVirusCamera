@@ -7629,6 +7629,50 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]],
         return None
 
 
+def _save_no_response_ip(ip: str) -> bool:
+    """Append an IP that did not respond on any scanned port."""
+    output_path = os.path.join(SCRIPT_DIR, "NoResponseIPs.txt")
+    try:
+        with result_file_lock:
+            with open(output_path, 'a', encoding='utf-8') as file:
+                file.write(f"{ip}\n")
+                file.flush()
+                os.fsync(file.fileno())
+        return True
+    except Exception as exc:
+        print(f"{Fore.RED}[!] Could not save no-response IP: {exc}{Style.RESET_ALL}")
+        return False
+
+
+def _save_detected_device(ip: str, port: int, open_ports, is_dahua: bool,
+                          country_name: str = "Unknown",
+                          country_code: str = "XX") -> bool:
+    output_path = os.path.join(SCRIPT_DIR, "DetectedDevices.txt")
+    record = [
+        f"{'=' * 60}\n",
+        f"Status: Detected - No Valid Credentials\n",
+        f"IP Address: {ip}\n",
+        f"Port: {port}\n",
+        f"Likely Type: {'Anjhua-Dahua Technology Camera' if is_dahua else 'Unknown Camera'}\n",
+        f"Open Ports: {', '.join(str(p) for p in open_ports)}\n",
+        f"URL: http://{ip}:{port}\n",
+        f"Country Name: {country_name}\n",
+        f"Country Code: {country_code}\n",
+        f"Detection Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
+        f"{'=' * 60}\n\n",
+    ]
+    try:
+        with result_file_lock:
+            with open(output_path, "a", encoding="utf-8") as file:
+                file.writelines(record)
+                file.flush()
+                os.fsync(file.fileno())
+        return True
+    except Exception as exc:
+        print(f"{Fore.RED}[!] Could not save detected device: {exc}{Style.RESET_ALL}")
+        return False
+
+
 def scan_single_ip(ip: str, credentials: List[Tuple[str, str]],
                    ports: List[int], country_name: str = "Unknown",
                    country_code: str = "XX") -> Optional[dict]:
@@ -7651,8 +7695,9 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]],
         open_ports = fast_port_scan(ip, ports)
 
         if not open_ports:
+            _save_no_response_ip(ip)
             sys.stdout.write(
-                f"\r\033[K{Fore.YELLOW}[-] [{current}/{total}] {ip}: no ports{Style.RESET_ALL}")
+                f"\r\033[K{Fore.YELLOW}[-] [{current}/{total}] {ip}: no ports — saved to NoResponseIPs.txt{Style.RESET_ALL}")
             sys.stdout.flush()
             return None
 
@@ -7778,8 +7823,13 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]],
                     )
                     return _result
 
+        _save_detected_device(
+            ip, detected_port, open_ports, is_dahua,
+            country_name=country_name,
+            country_code=country_code,
+        )
         print(
-            f"{Fore.YELLOW}[-] [{current}/{total}] {ip}: No valid credentials{Style.RESET_ALL}")
+            f"{Fore.YELLOW}[-] [{current}/{total}] {ip}: No valid credentials — device saved to DetectedDevices.txt{Style.RESET_ALL}")
         return None
 
     except Exception as e:
